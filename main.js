@@ -23,6 +23,8 @@ const KINDROID_BASE_URL = 'https://api.kindroid.ai/v1';
 const GROUPMAKER_REQUESTER = 'LIFELINE-MAINJS-GROUPMAKER';
 const PHONE_CALL_DIRECTIVE = 'This is a phone call. Respond in direct speech only. Avoid action or inner thought narration. Keep it concise.';
 const REMEMBERED_ACCESS_KEY = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+const REMEMBERED_KINDROID_API_KEY = localStorage.getItem(KINDROID_API_KEY_STORAGE_KEY) || '';
+const REMEMBERED_KINDROID_CONNECTED = REMEMBERED_KINDROID_API_KEY.trim().startsWith('kn_');
 const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true' && Boolean(REMEMBERED_ACCESS_KEY.trim());
 let groupmakerDraftSaveTimer = null;
 
@@ -75,12 +77,14 @@ const state = {
   filter: 'active',
   search: '',
   saving: false,
-  kindroidApiKey: localStorage.getItem(KINDROID_API_KEY_STORAGE_KEY) || '',
-  kindroidConnected: false,
+  kindroidApiKey: REMEMBERED_KINDROID_API_KEY,
+  kindroidConnected: REMEMBERED_KINDROID_CONNECTED,
   groupmakerOpen: false,
   groupmakerMinimized: false,
   groupmakerBusy: false,
-  groupmakerStatus: 'Enter your Kindroid API key to enable GROUPMAKER.',
+  groupmakerStatus: REMEMBERED_KINDROID_CONNECTED
+    ? 'Remembered Kindroid API key loaded locally. Ready to create or update groups.'
+    : 'Enter your Kindroid API key to enable GROUPMAKER.',
   groupmakerNames: '',
   groupmakerLocation: '',
   groupmakerPosition: '',
@@ -127,6 +131,19 @@ function hydrateGroupmakerDraft() {
   state.groupmakerPosition = String(draft.position || '');
   state.groupmakerContext = String(draft.context || '');
   state.groupmakerV2Mode = draft.v2_mode === undefined ? true : Boolean(draft.v2_mode);
+}
+
+function rememberKindroidApiKey() {
+  const key = state.kindroidApiKey.trim();
+  if (!key) {
+    state.kindroidConnected = false;
+    localStorage.removeItem(KINDROID_API_KEY_STORAGE_KEY);
+    return false;
+  }
+  const valid = key.startsWith('kn_');
+  if (valid) localStorage.setItem(KINDROID_API_KEY_STORAGE_KEY, key);
+  state.kindroidConnected = valid;
+  return valid;
 }
 
 function persistGroupmakerDraft() {
@@ -584,9 +601,12 @@ function bindDirectoryEvents() {
   document.querySelector('#gm-reconnect')?.addEventListener('click', syncGroupmaker);
   document.querySelector('#gm-close')?.addEventListener('click', () => { state.groupmakerOpen = false; render(); });
   document.querySelector('#gm-min')?.addEventListener('click', () => { state.groupmakerMinimized = !state.groupmakerMinimized; render(); });
-  document.querySelector('#gm-api-key')?.addEventListener('input', (e) => { state.kindroidApiKey = e.target.value.trim(); });
+  document.querySelector('#gm-api-key')?.addEventListener('input', (e) => {
+    state.kindroidApiKey = e.target.value.trim();
+    if (state.kindroidApiKey.startsWith('kn_')) rememberKindroidApiKey();
+  });
   document.querySelector('#gm-v2-mode')?.addEventListener('change', (e) => { state.groupmakerV2Mode = e.target.checked; state.groupmakerStatus = `${state.groupmakerV2Mode ? 'Kindroid v2 mode enabled' : 'Kindroid standard mode enabled'}. The next create/update opens the matching group call URL.`; scheduleGroupmakerDraftSave(); render(); });
-  document.querySelector('#gm-connect')?.addEventListener('click', () => { state.kindroidApiKey = document.querySelector('#gm-api-key').value.trim(); state.kindroidConnected = state.kindroidApiKey.startsWith('kn_'); if (state.kindroidConnected) { localStorage.setItem(KINDROID_API_KEY_STORAGE_KEY, state.kindroidApiKey); state.groupmakerStatus = 'Kindroid API key connected locally. Ready to create or update groups.'; } else { state.groupmakerStatus = 'Kindroid API keys should start with kn_.'; } render(); });
+  document.querySelector('#gm-connect')?.addEventListener('click', () => { state.kindroidApiKey = document.querySelector('#gm-api-key').value.trim(); if (rememberKindroidApiKey()) { state.groupmakerStatus = 'Kindroid API key connected and remembered locally. Ready to create or update groups.'; } else { state.groupmakerStatus = 'Kindroid API keys should start with kn_.'; } render(); });
   document.querySelector('#gm-forget')?.addEventListener('click', () => { state.kindroidApiKey = ''; state.kindroidConnected = false; localStorage.removeItem(KINDROID_API_KEY_STORAGE_KEY); state.groupmakerStatus = 'Kindroid API key forgotten.'; render(); });
   document.querySelector('#gm-sync')?.addEventListener('click', syncGroupmaker);
   document.querySelector('#gm-close-session')?.addEventListener('click', () => { const active = activeGroupmakerSession(); if (active) { active.closed_at = new Date().toISOString(); state.config.groupmaker_active_session_key = ''; saveBridge('GROUPMAKER close session'); } });
