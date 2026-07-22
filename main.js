@@ -27,6 +27,7 @@ const REMEMBERED_KINDROID_API_KEY = localStorage.getItem(KINDROID_API_KEY_STORAG
 const REMEMBERED_KINDROID_CONNECTED = REMEMBERED_KINDROID_API_KEY.trim().startsWith('kn_');
 const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true' && Boolean(REMEMBERED_ACCESS_KEY.trim());
 let groupmakerDraftSaveTimer = null;
+const groupmakerKindroidTabs = new Set();
 
 const DIRECTORY_FIELDS = [
   ['name', 'NAME', 'line'],
@@ -218,15 +219,32 @@ function kindroidGroupCallUrl(groupId) {
   return `https://kindroid.ai${path}`;
 }
 
+function closePriorGroupmakerTabs() {
+  for (const tab of [...groupmakerKindroidTabs]) {
+    if (!tab || tab.closed) {
+      groupmakerKindroidTabs.delete(tab);
+      continue;
+    }
+    try { tab.close(); } catch {}
+    groupmakerKindroidTabs.delete(tab);
+  }
+}
+
+function rememberGroupmakerTab(tabRef) {
+  if (tabRef && !tabRef.closed) groupmakerKindroidTabs.add(tabRef);
+}
+
 function openPreparedGroupmakerTab(tabRef, groupId) {
   const url = kindroidGroupCallUrl(groupId);
   if (!url) return false;
   if (tabRef && !tabRef.closed) {
     tabRef.location.href = url;
     try { tabRef.focus(); } catch {}
+    rememberGroupmakerTab(tabRef);
     return true;
   }
   const opened = window.open(url, '_blank');
+  rememberGroupmakerTab(opened);
   return Boolean(opened);
 }
 
@@ -585,6 +603,7 @@ async function syncGroupmaker() {
   const payload = { ai_list: aiList, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, share_short_term_memory: true, use_manual_turntaking: true, ...(active ? { group_id: active.group_id } : {}) };
   const toolKey = active ? 'update_groupchat' : 'create_groupchat';
   const endpoint = active ? '/groupchats-update' : '/groupchats-create';
+  closePriorGroupmakerTabs();
   const preparedTab = window.open('about:blank', '_blank');
   if (preparedTab) preparedTab.document.title = 'Opening Kindroid group…';
   state.groupmakerBusy = true; state.groupmakerStatus = `${active ? 'Updating' : 'Creating'} GROUPMAKER session…`; render();
