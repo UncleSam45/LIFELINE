@@ -79,7 +79,7 @@ const state = {
   saving: false,
   kindroidApiKey: REMEMBERED_KINDROID_API_KEY,
   kindroidConnected: REMEMBERED_KINDROID_CONNECTED,
-  groupmakerOpen: false,
+  groupmakerOpen: true,
   groupmakerMinimized: false,
   groupmakerBusy: false,
   groupmakerStatus: REMEMBERED_KINDROID_CONNECTED
