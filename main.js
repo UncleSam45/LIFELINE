@@ -69,8 +69,8 @@ const state = {
   authenticated: false,
   syncState: REMEMBERED_GITHUB_LOGIN_ENABLED ? 'Auto login' : 'Locked',
   syncDetail: REMEMBERED_GITHUB_LOGIN_ENABLED
-    ? 'Remembered GitHub credential found; connecting automatically…'
-    : 'Enter an access key to connect to the bridge repository.',
+    ? 'Remembered access key found; connecting automatically…'
+    : 'Enter your access key.',
   config: { directory_entries: [] },
   bridgeSha: '',
   selectedUid: '',
@@ -456,7 +456,7 @@ function filteredEntries() {
 }
 
 function renderLogin() {
-  root.innerHTML = `<main class="login-shell"><section class="login-card"><div class="orb"></div><p class="eyebrow">LIFELINE BRIDGE</p><h1>Secure directory access.</h1><p class="lede">Enter the GitHub fine-grained token configured for ${GITHUB_OWNER}/${BRIDGE_REPO}. The key is only used in this browser session unless you choose to remember it locally.</p><form id="login-form" class="access-form"><label>ACCESS KEY :</label><input id="access-key" type="password" autocomplete="off" value="${escapeHtml(state.accessKey)}" placeholder="github_pat_…" required /><label class="remember"><input id="remember-key" type="checkbox" ${state.rememberKey ? 'checked' : ''}/> Remember locally</label><button>Connect bridge</button></form><p class="sync-note">${escapeHtml(state.syncState)} — ${escapeHtml(state.syncDetail)}</p></section></main>`;
+  root.innerHTML = `<main class="login-shell"><section class="login-card"><div class="orb"></div><p class="eyebrow">LIFELINE</p><form id="login-form" class="access-form"><label>ACCESS KEY</label><input id="access-key" type="password" autocomplete="off" value="${escapeHtml(state.accessKey)}" placeholder="Access key" required /><label class="remember"><input id="remember-key" type="checkbox" ${state.rememberKey ? 'checked' : ''}/> Remember locally</label><button>Connect</button></form><p class="sync-note">${escapeHtml(state.syncState)} — ${escapeHtml(state.syncDetail)}</p></section></main>`;
   document.querySelector('#login-form').addEventListener('submit', (event) => {
     event.preventDefault();
     state.accessKey = document.querySelector('#access-key').value.trim();
@@ -640,7 +640,7 @@ function hasRememberedGitHubCredential() {
 function startRememberedLogin() {
   if (!hasRememberedGitHubCredential()) return false;
   state.syncState = 'Auto login';
-  state.syncDetail = 'Remembered GitHub credential found; connecting automatically…';
+  state.syncDetail = 'Remembered access key found; connecting automatically…';
   loadBridge();
   return true;
 }
