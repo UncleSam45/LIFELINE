@@ -344,6 +344,47 @@ async function readGithubContentFile(path) {
   return { sha: file.sha || '', config: normalizeImported(decodeBase64(content)) };
 }
 
+function isGithubShaMismatch(error) {
+  const message = String(error?.message || '');
+  return /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
+}
+
+async function refreshBridgeSha() {
+  const { sha } = await readGithubContentFile(BRIDGE_PATH);
+  state.bridgeSha = sha;
+  return sha;
+}
+
+async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
+  try {
+    const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: `${reason} via LIFELINE frontend`,
+        content: encodeBase64(state.config),
+        branch: BRIDGE_BRANCH,
+        ...(state.bridgeSha ? { sha: state.bridgeSha } : {}),
+      }),
+    });
+    state.bridgeSha = payload.content?.sha || state.bridgeSha;
+    return { payload, retried: false };
+  } catch (error) {
+    if (!retryOnShaMismatch || !isGithubShaMismatch(error)) throw error;
+    await refreshBridgeSha();
+    const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: `${reason} via LIFELINE frontend`,
+        content: encodeBase64(state.config),
+        branch: BRIDGE_BRANCH,
+        sha: state.bridgeSha,
+      }),
+    });
+    state.bridgeSha = payload.content?.sha || state.bridgeSha;
+    return { payload, retried: true };
+  }
+}
+
 function decodeBase64(content) {
   return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(content.replace(/\n/g, '')), (c) => c.charCodeAt(0))));
 }
@@ -403,17 +444,11 @@ async function loadBridge() {
 async function saveBridge(reason = 'Update directory') {
   state.saving = true; state.syncState = 'Saving'; state.syncDetail = 'Writing directory changes to GitHub…'; render();
   try {
-    const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
-      method: 'PUT',
-      body: JSON.stringify({
-        message: `${reason} via LIFELINE frontend`,
-        content: encodeBase64(state.config),
-        branch: BRIDGE_BRANCH,
-        ...(state.bridgeSha ? { sha: state.bridgeSha } : {}),
-      }),
-    });
-    state.bridgeSha = payload.content?.sha || state.bridgeSha;
-    state.syncState = 'Synced'; state.syncDetail = `Saved ${entries().length} entries to ${BRIDGE_PATH}.`;
+    const { retried } = await writeBridgeConfig(reason);
+    state.syncState = 'Synced';
+    state.syncDetail = retried
+      ? `Saved ${entries().length} entries to ${BRIDGE_PATH} after refreshing the latest GitHub version.`
+      : `Saved ${entries().length} entries to ${BRIDGE_PATH}.`;
   } catch (error) {
     state.syncState = 'Save failed'; state.syncDetail = error.message;
   } finally {
@@ -424,18 +459,11 @@ async function saveBridge(reason = 'Update directory') {
 
 async function saveBridgeQuiet(reason = 'Update directory') {
   try {
-    const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
-      method: 'PUT',
-      body: JSON.stringify({
-        message: `${reason} via LIFELINE frontend`,
-        content: encodeBase64(state.config),
-        branch: BRIDGE_BRANCH,
-        ...(state.bridgeSha ? { sha: state.bridgeSha } : {}),
-      }),
-    });
-    state.bridgeSha = payload.content?.sha || state.bridgeSha;
+    const { retried } = await writeBridgeConfig(reason);
     state.syncState = 'Synced';
-    state.syncDetail = `Saved GROUPMAKER draft to ${BRIDGE_PATH}.`;
+    state.syncDetail = retried
+      ? `Saved GROUPMAKER draft to ${BRIDGE_PATH} after refreshing the latest GitHub version.`
+      : `Saved GROUPMAKER draft to ${BRIDGE_PATH}.`;
   } catch (error) {
     state.syncState = 'Draft save failed';
     state.syncDetail = error.message;
