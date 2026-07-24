@@ -111,6 +111,7 @@ const state = {
   apiStudioAdvanced: false,
   apiStudioDebug: false,
   transcriptState: { conversationType: 'individual', conversationId: '', limit: 25, cursor: '', requestCount: 0, pages: [], messages: [], raw: null, busy: false, lastResult: '', activeRequestId: '' },
+  groupTranscriptState: { busy: false, groupId: '', pagesFetched: 0, messagesFound: 0, appearsToIncludeCall: false, bridgePath: '', githubSaved: false, result: 'No manual group transcript capture has run yet.', kindroidError: '', githubError: '', activeRequestId: '' },
   groupmakerStatus: REMEMBERED_KINDROID_CONNECTED
     ? 'Remembered Kindroid API key loaded locally. Ready to create or update groups.'
     : 'Enter your Kindroid API key to enable GROUPMAKER.',
@@ -202,6 +203,10 @@ function activeGroupmakerSession() {
 
 function latestOpenGroupmakerSession() {
   return groupmakerSessions().filter((row) => !String(row.closed_at || '').trim() && !String(row.idle_at || '').trim() && String(row.group_id || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')))[0] || null;
+}
+
+function latestGroupmakerSession() {
+  return groupmakerSessions().filter((row) => String(row.group_id || '').trim()).slice().sort((a, b) => String(b.created_at || b.touched_at || '').localeCompare(String(a.created_at || a.touched_at || '')))[0] || null;
 }
 
 function reconnectGroupmakerSession() {
@@ -603,22 +608,108 @@ async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
   }
 }
 
-function decodeBase64(content) {
-  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(content.replace(/\n/g, '')), (c) => c.charCodeAt(0))));
+function decodeBase64Text(content) {
+  return new TextDecoder().decode(Uint8Array.from(atob(String(content || '').replace(/\n/g, '')), (c) => c.charCodeAt(0)));
 }
 
-function encodeBase64(payload) {
-  const json = JSON.stringify(payload, null, 2);
-  const bytes = new TextEncoder().encode(json);
+function decodeBase64(content) {
+  return JSON.parse(decodeBase64Text(content));
+}
+
+function encodeTextBase64(text) {
+  const bytes = new TextEncoder().encode(String(text || ''));
   let binary = '';
   bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
   return btoa(binary);
+}
+
+function encodeBase64(payload) {
+  return encodeTextBase64(JSON.stringify(payload, null, 2));
 }
 
 function normalizeImported(payload) {
   if (Array.isArray(payload)) return { directory_entries: payload };
   if (payload && typeof payload === 'object') return { ...payload, directory_entries: Array.isArray(payload.directory_entries) ? payload.directory_entries : [] };
   throw new Error('Imported file must be a legacy config object or directory_entries array.');
+}
+
+
+async function readGithubTextFile(path) {
+  const file = await githubRequest(bridgeUrl(path));
+  let content = typeof file.content === 'string' ? file.content : '';
+  if (!content.trim() && file.git_url) {
+    const blob = await githubRequest(file.git_url);
+    content = typeof blob.content === 'string' ? blob.content : '';
+  }
+  return { sha: file.sha || '', text: decodeBase64Text(content) };
+}
+
+async function writeGithubTextFile(path, text, message, existingSha = '') {
+  return githubRequest(bridgeUrl(path, false), {
+    method: 'PUT',
+    body: JSON.stringify({
+      message,
+      content: encodeTextBase64(text),
+      branch: BRIDGE_BRANCH,
+      ...(existingSha ? { sha: existingSha } : {}),
+    }),
+  });
+}
+
+async function readExistingTranscript(path) {
+  try {
+    return await readGithubTextFile(path);
+  } catch (error) {
+    if (/not found/i.test(error.message || '')) return { sha: '', text: '' };
+    throw error;
+  }
+}
+
+function transcriptDatePath(groupId, date = new Date()) {
+  const day = date.toISOString().slice(0, 10);
+  return `transcripts/${groupId}/${day}.txt`;
+}
+
+function transcriptMessageKey(message = {}) {
+  return String(message.id || `${message.timestamp || ''}|${message.senderId || ''}|${message.senderType || ''}|${message.text || ''}`);
+}
+
+function parseSavedTranscriptMessages(text = '') {
+  return String(text || '').split(/\r?\n/).map((line) => line.startsWith('JSON ') ? line.slice(5) : '').filter(Boolean).map((line) => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).filter(Boolean);
+}
+
+function formatTranscriptMessage(message = {}) {
+  const when = message.timestamp ? new Date(message.timestamp).toISOString() : 'unknown-time';
+  const speaker = message.displayName || message.senderType || message.senderId || 'unknown';
+  const parts = [message.text, message.imageDescription && `[image: ${message.imageDescription}]`, message.videoDescription && `[video: ${message.videoDescription}]`, message.internetResponse && `[internet: ${message.internetResponse}]`, message.linkUrl && `[link: ${message.linkUrl}${message.linkDescription ? ` — ${message.linkDescription}` : ''}]`].filter(Boolean);
+  return `[${when}] ${speaker}: ${parts.join(' ')}`;
+}
+
+function formatGroupTranscriptFile({ session = {}, messages = [], pagesFetched = 0, fetchedAt = new Date().toISOString(), previousText = '' } = {}) {
+  const previousMessages = parseSavedTranscriptMessages(previousText);
+  const byKey = new Map(previousMessages.map((message) => [transcriptMessageKey(message), message]));
+  messages.forEach((message) => byKey.set(transcriptMessageKey(message), message));
+  const merged = [...byKey.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  const header = [
+    '# LIFELINE GROUPMAKER transcript capture',
+    `group_id: ${session.group_id || ''}`,
+    `group_name: ${session.group_name || ''}`,
+    `names: ${Array.isArray(session.names) ? session.names.join(', ') : ''}`,
+    `captured_at: ${fetchedAt}`,
+    `kindroid_pages_fetched: ${pagesFetched}`,
+    `kindroid_messages_found_this_run: ${messages.length}`,
+    `saved_messages_total: ${merged.length}`,
+    'format: Human-readable lines are followed by JSON lines used for de-duplication on later manual captures.',
+    '',
+  ].join('\n');
+  const body = merged.map((message) => `${formatTranscriptMessage(message)}\nJSON ${JSON.stringify(message)}`).join('\n\n');
+  return { text: `${header}${body}${body ? '\n' : ''}`, messages: merged };
+}
+
+function transcriptAppearsToIncludeCall(messages = []) {
+  return messages.some((message) => String(message.text || message.imageDescription || message.videoDescription || '').trim());
 }
 
 async function loadBridge() {
@@ -868,12 +959,19 @@ function renderKindroidField(operation, field, values) { const val = values[fiel
 function renderKindroidMatrices() { const ops=Object.values(ALL_KINDROID_OPERATIONS); return `<h4>Official vs experimental operation matrix</h4><pre>${escapeHtml(ops.map(o=>`${o.key}\t${o.stability}\t${o.method} ${o.endpoint}`).join('\n'))}</pre><h4>Field-support matrix</h4><pre>${escapeHtml(ops.flatMap(o=>o.fields.map(f=>`${o.key}.${f.key}\t${f.officiallySupported?'official':'experimental/legacy'}\t${f.officialEquivalent||''}`)).join('\n'))}</pre><h4>Legacy-route alias matrix</h4><pre>${escapeHtml(ops.filter(o=>o.stability==='legacy_alias'||o.aliases.length).map(o=>`${o.endpoint}\tmodern/alias: ${o.aliases.join(', ')||'see source notes'}`).join('\n'))}</pre><h4>Validation and error handling</h4><p>Validation checks required fields, exactly-one groups, numeric limits, rewind parity, and Discord conversation shape. HTTP errors normalize into validation, authentication, permission, not_found, rate_limit, server, network, timeout, cancelled, parse, or unknown.</p><h4>Manual test report</h4><p>No live Kindroid operations were deliberately executed by this implementation task. Official and experimental operations remain unverified until a user executes and saves a result in the Studio.</p>`; }
 function renderTranscriptExplorer(){const t=state.transcriptState;return `<section class="transcript-panel"><p class="eyebrow">TRANSCRIPT EXPLORER</p><h3>Manual get-chat-messages paging</h3><div class="field-grid"><label><span>Type</span><select id="tx-type"><option value="individual" ${t.conversationType==='individual'?'selected':''}>Individual</option><option value="group" ${t.conversationType==='group'?'selected':''}>Group</option></select></label><label><span>Conversation ID</span><input id="tx-id" value="${escapeHtml(t.conversationId)}" /></label><label><span>Page size 1-100</span><input id="tx-limit" type="number" min="1" max="100" value="${escapeHtml(t.limit)}" /></label><label><span>Cursor</span><input id="tx-cursor" value="${escapeHtml(t.cursor)}" /></label></div><div class="gm-row"><button id="tx-first" class="ghost">Fetch first page</button><button id="tx-next">Fetch next page</button><button id="tx-stop" class="danger">Stop/cancel</button><button id="tx-copy" class="ghost">Copy normalized transcript</button></div><p class="sync-note">Requests this session: ${t.requestCount}. Cursor: ${escapeHtml(t.cursor || 'none')}. Documented transcript limit: 600 requests per 24 hours; no long polling.</p><pre>${escapeHtml(JSON.stringify({ lastResult:t.lastResult, normalized:t.messages, raw:t.raw }, null, 2))}</pre></section>`}
 
+
+function renderGroupTranscriptCapturePanel() {
+  const tx = state.groupTranscriptState;
+  const latest = latestGroupmakerSession();
+  return `<section class="gm-transcript-test"><div><b>Manual group-call transcript test</b><small>Latest group: ${escapeHtml(latest?.group_id || 'none')}</small></div><button id="gm-capture-transcript" class="ghost" ${tx.busy || !latest?.group_id ? 'disabled' : ''}>${tx.busy ? 'Fetching transcript…' : 'Fetch & save latest transcript'}</button><pre>${escapeHtml(JSON.stringify({ group_id: tx.groupId || latest?.group_id || '', pages_fetched: tx.pagesFetched, messages_found: tx.messagesFound, appears_to_include_group_call_conversation: tx.appearsToIncludeCall, bridge_path: tx.bridgePath || (latest?.group_id ? transcriptDatePath(latest.group_id) : ''), github_save_succeeded: tx.githubSaved, result: tx.result, kindroid_error: tx.kindroidError, github_error: tx.githubError }, null, 2))}</pre></section>`;
+}
+
 function renderGroupmakerWindow() {
   if (!state.groupmakerOpen) return '';
   const people = detectGroupmakerPeople(state.groupmakerNames);
   const active = activeGroupmakerSession();
   const sessions = groupmakerSessions().filter((row) => !String(row.closed_at || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')));
-  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p><div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
+  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div>${renderGroupTranscriptCapturePanel()}<p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p><div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
 
@@ -976,7 +1074,7 @@ async function syncGroupmaker() {
       const groupId = extractGroupId(result.groupIdSource || result.detail);
       if (!groupId) throw new Error('Create succeeded, but no group_id could be parsed from the response.');
       const automation = await runGroupmakerPresenceAutomations({ people, groupId, active: null, aiList });
-      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
+      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, created_at: now, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
       state.config.groupmaker_sessions = groupmakerSessions().filter((row) => row.group_id !== groupId).concat(target);
       state.config.groupmaker_active_session_key = groupId;
       const opened = openPreparedGroupmakerTab(preparedTab, groupId);
@@ -988,6 +1086,50 @@ async function syncGroupmaker() {
     if (preparedTab && !preparedTab.closed) preparedTab.close();
     state.groupmakerStatus = error.message;
   } finally { state.groupmakerBusy = false; render(); }
+}
+
+
+async function captureLatestGroupmakerTranscript() {
+  const tx = state.groupTranscriptState;
+  const session = latestGroupmakerSession();
+  if (tx.busy) return;
+  if (!session?.group_id) { tx.result = 'No LIFELINE-created GROUPMAKER session with a group_id was found.'; render(); return; }
+  tx.busy = true; tx.groupId = String(session.group_id).trim(); tx.pagesFetched = 0; tx.messagesFound = 0; tx.appearsToIncludeCall = false; tx.bridgePath = transcriptDatePath(tx.groupId); tx.githubSaved = false; tx.kindroidError = ''; tx.githubError = ''; tx.result = 'Fetching complete official transcript from Kindroid…'; tx.activeRequestId = `group_transcript_${Date.now()}`; render();
+  const messages = [];
+  let cursor = '';
+  let lastCursor = '';
+  try {
+    for (let page = 0; page < 600; page += 1) {
+      const result = await fetchKindroidMessagesPage({ conversationType: 'group', conversationId: tx.groupId, limit: 100, cursor, requestId: `${tx.activeRequestId}_${page}` });
+      tx.pagesFetched += 1;
+      if (!result.ok) { tx.kindroidError = `${result.category || 'kindroid_error'}: ${result.message || result.status || 'Kindroid request failed'}`; tx.result = 'Kindroid transcript fetch failed before GitHub save.'; break; }
+      const payload = result.data || {};
+      const rawMessages = Array.isArray(payload.messages) ? payload.messages : (Array.isArray(payload) ? payload : []);
+      messages.push(...rawMessages.map((message) => normalizeKindroidMessage(message, { conversationType: 'group', conversationId: tx.groupId })));
+      const nextCursor = String(payload.pagination?.lastTimestamp || payload.lastTimestamp || '');
+      if (!rawMessages.length || !nextCursor || nextCursor === lastCursor || nextCursor === cursor) break;
+      lastCursor = cursor;
+      cursor = nextCursor;
+    }
+    const uniqueMessages = mergeKindroidMessagePages([], messages);
+    tx.messagesFound = uniqueMessages.length;
+    tx.appearsToIncludeCall = transcriptAppearsToIncludeCall(uniqueMessages);
+    if (!tx.kindroidError) {
+      try {
+        const existing = await readExistingTranscript(tx.bridgePath);
+        const formatted = formatGroupTranscriptFile({ session, messages: uniqueMessages, pagesFetched: tx.pagesFetched, previousText: existing.text });
+        await writeGithubTextFile(tx.bridgePath, formatted.text, `Capture GROUPMAKER transcript ${tx.groupId} via LIFELINE frontend`, existing.sha);
+        tx.githubSaved = true;
+        tx.result = `Manual transcript capture complete for ${tx.groupId}. ${tx.appearsToIncludeCall ? 'Returned content contains message text/media descriptions to inspect for call speech.' : 'No text or media description content was returned; group-call speech is not evident in this capture.'}`;
+      } catch (error) {
+        tx.githubError = error.message || 'GitHub transcript save failed.';
+        tx.result = 'Kindroid transcript fetch succeeded, but GitHub save failed.';
+      }
+    }
+  } finally {
+    tx.busy = false;
+    render();
+  }
 }
 
 
@@ -1061,6 +1203,7 @@ function bindDirectoryEvents() {
   document.querySelector('#gm-connect')?.addEventListener('click', () => { state.kindroidApiKey = document.querySelector('#gm-api-key').value.trim(); if (rememberKindroidApiKey()) { state.groupmakerStatus = 'Kindroid API key connected and remembered locally. Ready to create or update groups.'; } else { state.groupmakerStatus = 'Kindroid API keys should start with kn_.'; } render(); });
   document.querySelector('#gm-forget')?.addEventListener('click', () => { state.kindroidApiKey = ''; state.kindroidConnected = false; localStorage.removeItem(KINDROID_API_KEY_STORAGE_KEY); state.groupmakerStatus = 'Kindroid API key forgotten.'; render(); });
   document.querySelector('#gm-sync')?.addEventListener('click', syncGroupmaker);
+  document.querySelector('#gm-capture-transcript')?.addEventListener('click', captureLatestGroupmakerTranscript);
   document.querySelector('#gm-close-session')?.addEventListener('click', () => { const active = activeGroupmakerSession(); if (active) { active.closed_at = new Date().toISOString(); state.config.groupmaker_active_session_key = ''; saveBridge('GROUPMAKER close session'); } });
   document.querySelectorAll('.gm-session').forEach((button) => button.addEventListener('click', () => { state.config.groupmaker_active_session_key = button.dataset.session; saveBridge('GROUPMAKER activate session'); }));
   ['names', 'location', 'position', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names') refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); }); });
