@@ -100,6 +100,9 @@ const state = {
   groupmakerOpen: true,
   groupmakerMinimized: false,
   groupmakerBusy: false,
+  groupmakerTranscriptBusy: false,
+  groupmakerTranscriptStatus: '',
+  groupmakerTranscriptResult: null,
   apiStudioOpen: false,
   apiStudioCategory: 'individual_chat',
   apiStudioOperationKey: 'send_message',
@@ -872,10 +875,61 @@ function renderGroupmakerWindow() {
   if (!state.groupmakerOpen) return '';
   const people = detectGroupmakerPeople(state.groupmakerNames);
   const active = activeGroupmakerSession();
+  const transcriptTarget = resolveGroupmakerTranscriptSession();
+  const transcriptEnabled = Boolean(transcriptTarget?.group_id) && !state.groupmakerTranscriptBusy;
+  const transcriptStatus = state.groupmakerTranscriptStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerTranscriptStatus)}</p>` : '';
   const sessions = groupmakerSessions().filter((row) => !String(row.closed_at || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')));
-  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p><div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
+  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><div class="gm-row"><button id="gm-fetch-transcript" class="ghost" ${transcriptEnabled ? '' : 'disabled'}>FETCH VOICE TRANSCRIPT</button></div><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p>${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
+
+function groupmakerSessionHasGroupId(session) {
+  return Boolean(String(session?.group_id || '').trim());
+}
+
+function resolveGroupmakerTranscriptSession() {
+  const sessions = groupmakerSessions().filter(groupmakerSessionHasGroupId);
+  if (!sessions.length) return null;
+  const activeKey = String(state.config.groupmaker_active_session_key || '').trim();
+  const selected = sessions.find((row) => String(row.session_key || row.group_id || '').trim() === activeKey);
+  if (selected) return selected;
+  const active = activeGroupmakerSession();
+  if (groupmakerSessionHasGroupId(active)) return active;
+  return sessions.slice().sort((a, b) => String(b.touched_at || b.closed_at || '').localeCompare(String(a.touched_at || a.closed_at || '')))[0] || null;
+}
+
+function groupmakerChatUrl(groupId) {
+  return `https://kindroid.ai/v2/chat/group/${encodeURIComponent(String(groupId || '').trim())}/`;
+}
+
+async function fetchGroupmakerTranscript() {
+  if (state.groupmakerTranscriptBusy) return;
+  const session = resolveGroupmakerTranscriptSession();
+  if (!session?.group_id) { state.groupmakerTranscriptStatus = 'No GROUPMAKER session with a group_id is available.'; render(); return; }
+  if (!window.lifelineElectron?.fetchGroupTranscript) { state.groupmakerTranscriptStatus = 'Electron transcript bridge is not available.'; render(); return; }
+  const groupId = String(session.group_id || '').trim();
+  const participants = Array.isArray(session.names) ? session.names.map((name) => String(name || '').trim()).filter(Boolean) : [];
+  const capturedAt = new Date().toISOString();
+  const payload = { groupId, groupName: String(session.group_name || session.name || '').trim(), participants, capturedAt, accessKey: state.accessKey, chatUrl: groupmakerChatUrl(groupId) };
+  state.groupmakerTranscriptBusy = true;
+  state.groupmakerTranscriptResult = null;
+  state.groupmakerTranscriptStatus = 'Opening group transcript page…\nLoading older transcript entries…\nExtracting transcript bubbles…\nComparing with bridge history…\nSaving transcript to LIFELINE_BRIDGE…';
+  render();
+  try {
+    const result = await window.lifelineElectron.fetchGroupTranscript(payload);
+    state.groupmakerTranscriptResult = result;
+    if (!result?.ok) throw new Error(`${result?.stage || 'unknown'}: ${result?.message || 'Transcript capture failed.'}`);
+    session.last_transcript_capture = { captured_at: result.capturedAt, repo_path: result.repoPath, entries_found: result.bubblesFound, new_entries: result.newEntries, total_entries: result.totalEntries, participants_present: [...participants] };
+    session.touched_at = result.capturedAt;
+    state.groupmakerTranscriptStatus = `Transcript saved for ${result.groupName || 'GROUPMAKER group'}.\nGroup: ${result.groupId}\nParticipants: ${result.participants.join(', ') || '—'}\nDOM entries found: ${result.bubblesFound}\nNew entries saved: ${result.newEntries}\nTotal stored entries: ${result.totalEntries}\nPath: ${result.repoPath}`;
+    await saveBridgeQuiet('GROUPMAKER transcript metadata');
+  } catch (error) {
+    state.groupmakerTranscriptStatus = `Transcript capture failed at ${String(error.message || error).replace(/^([^:]+):/, '$1:')}`;
+  } finally {
+    state.groupmakerTranscriptBusy = false;
+    render();
+  }
+}
 
 function groupmakerPhysicalLocation() {
   return String(state.groupmakerLocation || '').trim();
@@ -1061,6 +1115,7 @@ function bindDirectoryEvents() {
   document.querySelector('#gm-connect')?.addEventListener('click', () => { state.kindroidApiKey = document.querySelector('#gm-api-key').value.trim(); if (rememberKindroidApiKey()) { state.groupmakerStatus = 'Kindroid API key connected and remembered locally. Ready to create or update groups.'; } else { state.groupmakerStatus = 'Kindroid API keys should start with kn_.'; } render(); });
   document.querySelector('#gm-forget')?.addEventListener('click', () => { state.kindroidApiKey = ''; state.kindroidConnected = false; localStorage.removeItem(KINDROID_API_KEY_STORAGE_KEY); state.groupmakerStatus = 'Kindroid API key forgotten.'; render(); });
   document.querySelector('#gm-sync')?.addEventListener('click', syncGroupmaker);
+  document.querySelector('#gm-fetch-transcript')?.addEventListener('click', fetchGroupmakerTranscript);
   document.querySelector('#gm-close-session')?.addEventListener('click', () => { const active = activeGroupmakerSession(); if (active) { active.closed_at = new Date().toISOString(); state.config.groupmaker_active_session_key = ''; saveBridge('GROUPMAKER close session'); } });
   document.querySelectorAll('.gm-session').forEach((button) => button.addEventListener('click', () => { state.config.groupmaker_active_session_key = button.dataset.session; saveBridge('GROUPMAKER activate session'); }));
   ['names', 'location', 'position', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names') refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); }); });
