@@ -4,6 +4,9 @@ const crypto = require('crypto');
 
 const APP_ROOT = __dirname;
 const transcriptWindows = new Map();
+const KINDROID_PANEL_URL = 'https://kindroid.ai/v2/kins/';
+let mainWindow = null;
+let kindroidPanel = null;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -19,8 +22,34 @@ function createMainWindow() {
       nodeIntegration: false,
     },
   });
+  mainWindow = win;
+  win.on('closed', () => { mainWindow = null; });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
+}
+
+function openKindroidPanel() {
+  if (kindroidPanel && !kindroidPanel.isDestroyed()) {
+    if (kindroidPanel.isMinimized()) kindroidPanel.restore();
+    kindroidPanel.show();
+    kindroidPanel.focus();
+    return { ok: true, reused: true, url: kindroidPanel.webContents.getURL() || KINDROID_PANEL_URL };
+  }
+  kindroidPanel = new BrowserWindow({
+    width: 520, height: 780, minWidth: 380, minHeight: 520,
+    title: 'Kindroid · LIFELINE panel', parent: mainWindow || undefined,
+    show: false, autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  kindroidPanel.setMenuBarVisibility(false);
+  kindroidPanel.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://kindroid.ai/')) kindroidPanel.loadURL(url);
+    return { action: 'deny' };
+  });
+  kindroidPanel.once('ready-to-show', () => kindroidPanel?.show());
+  kindroidPanel.on('closed', () => { kindroidPanel = null; });
+  kindroidPanel.loadURL(KINDROID_PANEL_URL);
+  return { ok: true, reused: false, url: KINDROID_PANEL_URL };
 }
 
 function cleanGroupId(value) {
@@ -316,6 +345,8 @@ ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
   await win.loadURL(String(payload.url || 'https://kindroid.ai/'));
   return true;
 });
+
+ipcMain.handle('lifeline:open-kindroid-panel', () => openKindroidPanel());
 
 ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) => {
   const groupId = cleanGroupId(payload.groupId);

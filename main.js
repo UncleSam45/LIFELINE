@@ -20,6 +20,7 @@ const TOKEN_STORAGE_KEY = 'lifeline.bridge.accessKey';
 const REMEMBER_STORAGE_KEY = 'lifeline.bridge.rememberAccessKey';
 const KINDROID_API_KEY_STORAGE_KEY = 'lifeline.kindroid.apiKey';
 const KINDROID_BASE_URL = 'https://api.kindroid.ai/v1';
+const KINDROID_PANEL_URL = 'https://kindroid.ai/v2/kins/';
 const GROUPMAKER_REQUESTER = 'LIFELINE-MAINJS-GROUPMAKER';
 const PHONE_CALL_DIRECTIVE = 'This is a phone call. Respond in direct speech only. Avoid action or inner thought narration. Keep it concise.';
 const REMEMBERED_ACCESS_KEY = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
@@ -123,7 +124,26 @@ const state = {
   groupmakerContext: '',
   activeEntryTab: 'profile',
   settingsOpen: false,
+  kindroidPanelStatus: '',
 };
+
+async function openKindroidPanel() {
+  state.kindroidPanelStatus = 'Opening Kindroid…';
+  const electronBridge = window.lifelineElectron?.openKindroidPanel;
+  if (electronBridge) {
+    try {
+      const result = await electronBridge();
+      state.kindroidPanelStatus = result?.reused ? 'Kindroid panel focused.' : 'Kindroid panel opened.';
+    } catch (error) {
+      state.kindroidPanelStatus = `Could not open Kindroid: ${error.message}`;
+    }
+  } else {
+    const popup = window.open(KINDROID_PANEL_URL, 'lifeline-kindroid-panel', 'popup,width=520,height=780,resizable=yes,scrollbars=yes');
+    state.kindroidPanelStatus = popup ? 'Kindroid opened in a browser window.' : 'Your browser blocked the Kindroid window.';
+  }
+  render();
+}
+
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (char) => ({
@@ -783,7 +803,7 @@ function renderWorldView() {
     ['NEWS', 'PENDING', 'connector slot'],
     ['AGENDA', 'PENDING', 'connector slot'],
   ];
-  return `<section class="world-home"><div class="world-home-head"><p class="eyebrow">LIFELINE</p><h1>Welcome</h1><button id="world-enter-directory" type="button">Open DIRECTORY</button></div><div class="world-card-grid">${cards.map(([label, value, note]) => `<article><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b><small>${escapeHtml(note)}</small></article>`).join('')}</div><section class="world-panel"><p class="eyebrow">ACTIVE PEOPLE</p><div class="world-person-grid">${online.slice(0, 8).map((entry) => `<button class="world-person" data-world-uid="${escapeHtml(entry.directory_uid)}"><span class="avatar online">${entryInitials(entry)}</span><b>${escapeHtml(entry.name || 'Unnamed')}</b><small>${escapeHtml(entry.location || 'No location')}</small></button>`).join('') || '<div class="empty small">No one is marked online.</div>'}</div></section></section>`;
+  return `<section class="world-home"><div class="world-home-head"><p class="eyebrow">LIFELINE</p><h1>Welcome</h1><div class="world-launchers"><button id="world-open-kindroid" class="kindroid-launch" type="button"><span>K</span><b>Open Kindroid</b><small>Floating app panel</small></button><button id="world-enter-directory" type="button">Open DIRECTORY</button></div>${state.kindroidPanelStatus ? `<p class="panel-status">${escapeHtml(state.kindroidPanelStatus)}</p>` : ''}</div><div class="world-card-grid">${cards.map(([label, value, note]) => `<article><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b><small>${escapeHtml(note)}</small></article>`).join('')}</div><section class="world-panel"><p class="eyebrow">ACTIVE PEOPLE</p><div class="world-person-grid">${online.slice(0, 8).map((entry) => `<button class="world-person" data-world-uid="${escapeHtml(entry.directory_uid)}"><span class="avatar online">${entryInitials(entry)}</span><b>${escapeHtml(entry.name || 'Unnamed')}</b><small>${escapeHtml(entry.location || 'No location')}</small></button>`).join('') || '<div class="empty small">No one is marked online.</div>'}</div></section></section>`;
 }
 
 function renderDirectoryWorkspace(current, onlineLabel) {
@@ -797,7 +817,7 @@ function renderDirectory() {
   const current = selectedEntry();
   const onlineLabel = current?.online ? 'Available now' : 'Standing by';
   const editorContent = state.activeView === 'world' ? renderWorldView() : renderDirectoryWorkspace(current, onlineLabel);
-  root.innerHTML = `<main class="app-shell"><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="world-view" class="ghost ${state.activeView === 'world' ? 'active' : ''}" type="button">Home</button><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}</main>`;
+  root.innerHTML = `<main class="app-shell"><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="world-view" class="ghost ${state.activeView === 'world' ? 'active' : ''}" type="button">Home</button><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button></nav><button id="kindroid-panel-toggle" class="kindroid-sidebar-launch" type="button" title="Open the Kindroid website in a floating app window"><span>K</span><b>KINDROID PANEL</b><small>${escapeHtml(state.kindroidPanelStatus || 'Open kins in a floating window')}</small></button><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}</main>`;
   bindDirectoryEvents();
 }
 
@@ -1072,6 +1092,8 @@ function bindDirectoryEvents() {
   document.querySelector('#world-view')?.addEventListener('click', () => { state.activeView = 'world'; render(); });
   document.querySelector('#directory-view')?.addEventListener('click', () => { state.activeView = 'directory'; render(); });
   document.querySelector('#world-enter-directory')?.addEventListener('click', () => { state.activeView = 'directory'; render(); });
+  document.querySelector('#world-open-kindroid')?.addEventListener('click', openKindroidPanel);
+  document.querySelector('#kindroid-panel-toggle')?.addEventListener('click', openKindroidPanel);
   document.querySelectorAll('.world-person').forEach((button) => button.addEventListener('click', () => { state.selectedUid = button.dataset.worldUid; state.activeView = 'directory'; render(); }));
   document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
