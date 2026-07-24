@@ -4,6 +4,7 @@ const crypto = require('crypto');
 
 const APP_ROOT = __dirname;
 const transcriptWindows = new Map();
+const kindroidCallWindows = new Map();
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -157,6 +158,9 @@ function extractionScript() {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const clean = (v) => String(v || '').replace(/\\s+/g, ' ').trim();
     const selectors = [
+      'article[data-chat-message="true"] p.v2-message-selectable',
+      'article[data-chat-message="true"] p[class*="chat-bubble-v2_bubble-text"]',
+      'article[data-chat-message="true"] p',
       'p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable',
       'p.chat-bubble-v2_bubble-text__QUcZ9',
       'p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable',
@@ -194,8 +198,13 @@ function extractionScript() {
     };
     const findBubbles = () => {
       for (const selector of selectors) {
-        const nodes = queryAllDeep(selector).filter((node) => clean(node.innerText || node.textContent) && visible(node));
+        // Radix transcript sheets can report zero-sized rows while their scroll
+        // container is settling.  Keep those rows: textContent is still the
+        // transcript and filtering them as "invisible" loses the entire sheet.
+        const candidates = queryAllDeep(selector).filter((node) => clean(node.innerText || node.textContent));
+        const nodes = candidates.filter(visible);
         if (nodes.length) return { selector, nodes };
+        if (candidates.length) return { selector, nodes: candidates };
       }
       return { selector: '', nodes: [] };
     };
@@ -223,10 +232,14 @@ function extractionScript() {
     found = findBubbles();
     const nodes = found.nodes;
     const rows = nodes.map((node, domIndex) => {
-      const wrapper = node.closest('[data-message-id], [data-id], [data-testid], [id], [data-index]') || node.parentElement;
+      // A voice transcript row is an article[data-chat-message] and its h3 is
+      // the only reliable speaker label (for example, "Message from You").
+      // Prefer that semantic row over hashed CSS-module class names.
+      const article = node.closest('article[data-chat-message]');
+      const wrapper = article || node.closest('[data-message-id], [data-id], [data-testid], [id], [data-index]') || node.parentElement;
       const pick = (el, attrs) => attrs.map((a) => el?.getAttribute?.(a)).find((v) => clean(v));
       const timeEl = wrapper?.querySelector?.('time,[datetime],[data-time],[data-timestamp]') || node.closest('time,[datetime]');
-      const speakerEl = wrapper?.querySelector?.('[data-speaker],[data-display-name],[class*="speaker" i],[class*="display-name" i],[class*="name" i]');
+      const speakerEl = article?.querySelector?.('h3') || wrapper?.querySelector?.('[data-speaker],[data-display-name],[class*="speaker" i],[class*="display-name" i],[class*="name" i]');
       return { text: clean(node.innerText || node.textContent), domIndex, messageId: clean(pick(node, ['data-message-id','data-id','data-testid','id','data-index']) || pick(wrapper, ['data-message-id','data-id','data-testid','id','data-index'])), timestamp: clean(timeEl?.getAttribute?.('datetime') || timeEl?.getAttribute?.('data-time') || timeEl?.getAttribute?.('data-timestamp') || timeEl?.textContent), speaker: clean(speakerEl?.getAttribute?.('data-speaker') || speakerEl?.getAttribute?.('data-display-name') || speakerEl?.textContent) };
     });
     rows.forEach((row, i) => { row.previousText = rows[i - 1]?.text || ''; row.nextText = rows[i + 1]?.text || ''; });
@@ -240,6 +253,15 @@ function getTranscriptWindow(groupId) {
   const win = new BrowserWindow({ width: 1280, height: 900, title: `Kindroid transcript ${groupId}`, show: true, webPreferences: { contextIsolation: true, nodeIntegration: false } });
   win.on('closed', () => transcriptWindows.delete(groupId));
   transcriptWindows.set(groupId, win);
+  return win;
+}
+
+function getOpenKindroidCallWindow(groupId) {
+  const win = kindroidCallWindows.get(groupId);
+  if (!win || win.isDestroyed()) {
+    kindroidCallWindows.delete(groupId);
+    return null;
+  }
   return win;
 }
 
@@ -304,7 +326,7 @@ async function navigateTranscriptWindow(win, sourceUrl, groupId) {
 
 async function waitForBubbles(win) {
   for (let i = 0; i < 30; i += 1) {
-    const count = await win.webContents.executeJavaScript(`document.querySelectorAll('p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable, p.chat-bubble-v2_bubble-text__QUcZ9, p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable, p[class*="chat-bubble-v2_bubble-text"], p.v2-message-selectable').length`, true);
+    const count = await win.webContents.executeJavaScript(`document.querySelectorAll('article[data-chat-message="true"] p, p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable, p.chat-bubble-v2_bubble-text__QUcZ9, p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable, p[class*="chat-bubble-v2_bubble-text"], p.v2-message-selectable').length`, true);
     if (count > 0) return count;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
@@ -312,8 +334,24 @@ async function waitForBubbles(win) {
 }
 
 ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
+  const groupId = cleanGroupId(payload.groupId);
+  const existing = groupId ? getOpenKindroidCallWindow(groupId) : null;
+  if (existing) {
+    existing.show();
+    existing.focus();
+    return true;
+  }
   const win = new BrowserWindow({ width: 1280, height: 900, title: 'Kindroid call', webPreferences: { contextIsolation: true, nodeIntegration: false } });
-  await win.loadURL(String(payload.url || 'https://kindroid.ai/'));
+  if (groupId) {
+    kindroidCallWindows.set(groupId, win);
+    win.on('closed', () => kindroidCallWindows.delete(groupId));
+  }
+  // Do not couple the lifetime of the visible Kindroid window to an IPC
+  // promise. Kindroid may replace the initial navigation through its client
+  // router; loadURL can reject even though that replacement page is healthy.
+  win.loadURL(String(payload.url || 'https://kindroid.ai/')).catch((error) => {
+    console.error('Kindroid call navigation failed:', error);
+  });
   return true;
 });
 
@@ -328,15 +366,20 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
   const capturedAt = normalizeText(payload.capturedAt) || new Date().toISOString();
   const repoPath = `transcripts/${groupId}/transcript.json`;
   try {
-    const win = getTranscriptWindow(groupId);
-    await navigateTranscriptWindow(win, sourceUrl, groupId);
+    // Voice transcripts live in the Radix sheet in the active call window.
+    // Reusing that page avoids destroying the sheet by navigating to chat.
+    const callWindow = getOpenKindroidCallWindow(groupId);
+    const win = callWindow || getTranscriptWindow(groupId);
+    if (!callWindow) await navigateTranscriptWindow(win, sourceUrl, groupId);
     if (isKindroidAuthenticationPage(win.webContents.getURL())) {
       return failure('authentication', 'Kindroid authentication is required before a transcript can be captured.', { groupId, sourceUrl });
     }
     await waitForBubbles(win);
     const extracted = await win.webContents.executeJavaScript(extractionScript(), true);
     if (!extracted || !Array.isArray(extracted.bubbles)) return failure('dom_extraction', 'Transcript extraction returned an invalid payload.', { groupId, sourceUrl });
-    if (!extracted.bubbles.length) return failure('dom_wait', 'No transcript bubbles were found. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
+    if (!extracted.bubbles.length) return failure('dom_wait', callWindow
+      ? 'No transcript bubbles were found in the active call. Open the call transcript sheet, then fetch again.'
+      : 'No transcript bubbles were found. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
     const merged = await saveMergedTranscript(token, repoPath, { groupId, groupName, participants, capturedAt, sourceUrl, bubbles: extracted.bubbles });
     return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: extracted.selectorUsed, scrollAttempts: extracted.scrollAttempts, bubblesFound: extracted.bubblesFound, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
   } catch (error) {
