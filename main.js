@@ -836,6 +836,64 @@ function renderGroupmakerWindow() {
   return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p><div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
+
+function groupmakerPhysicalLocation() {
+  return String(state.groupmakerLocation || '').trim();
+}
+
+function sameNormalizedText(left, right) {
+  return String(left || '').trim().toLowerCase() === String(right || '').trim().toLowerCase();
+}
+
+function formatGroupmakerNames(names = []) {
+  const clean = names.map((name) => String(name || '').trim()).filter(Boolean);
+  if (clean.length <= 2) return clean.join(clean.length === 2 ? ' and ' : '');
+  return `${clean.slice(0, -1).join(' , ')} and ${clean[clean.length - 1]}`;
+}
+
+function groupmakerPresenceChanged(active, aiList = [], location = '') {
+  if (!active) return true;
+  const priorIds = validAiIds(active.ai_list || []);
+  const currentIds = validAiIds(aiList || []);
+  const samePeople = priorIds.length === currentIds.length && priorIds.every((id) => currentIds.includes(id));
+  const priorLocation = String(active.physical_location || active.location || '').trim();
+  return !samePeople || (location && !sameNormalizedText(priorLocation, location));
+}
+
+async function runGroupmakerPresenceAutomations({ people = [], groupId = '', active = null, aiList = [] } = {}) {
+  const location = groupmakerPhysicalLocation();
+  const report = { directSent: 0, groupSent: false, changedNames: [], errors: [] };
+  if (!location || !people.length) return report;
+
+  if (groupId && groupmakerPresenceChanged(active, aiList, location)) {
+    const names = formatGroupmakerNames(people.map((person) => person.name));
+    if (names) {
+      const message = `*${names} are now physically present together . Their location is ${location}*`;
+      const result = await kindroidApiClient.execute('group_user_message', { group_id: groupId, message }, { timeoutMs: 12000 });
+      if (result.ok) report.groupSent = true;
+      else report.errors.push(`Group presence recap failed: ${result.message || result.status || 'Kindroid request failed'}`);
+    }
+  }
+
+  for (const person of people) {
+    const entry = entries().map(ensureEntry).find((row) => String(row.ai_id || '').trim() === String(person.ai_id || '').trim());
+    if (!entry) continue;
+    const oldLocation = String(entry.location || '').trim();
+    if (oldLocation && sameNormalizedText(oldLocation, location)) continue;
+    const message = `*${entry.name || person.name || 'This person'} is currently transiting from ${oldLocation || 'unknown location'} to ${location}*`;
+    const result = await kindroidApiClient.execute('send_message', { ai_id: entry.ai_id, message, stream: false }, { timeoutMs: 12000 });
+    if (!result.ok) {
+      report.errors.push(`Location notice failed for ${entry.name || person.name || entry.ai_id}: ${result.message || result.status || 'Kindroid request failed'}`);
+      continue;
+    }
+    entry.location = location;
+    report.changedNames.push(entry.name || person.name || entry.ai_id);
+    report.directSent += 1;
+  }
+
+  return report;
+}
+
 async function syncGroupmaker() {
   const keyInput = document.querySelector('#gm-api-key');
   if (keyInput) state.kindroidApiKey = keyInput.value.trim();
@@ -848,7 +906,7 @@ async function syncGroupmaker() {
   const context = state.groupmakerContext.trim();
   const people = detectGroupmakerPeople(state.groupmakerNames);
   const detectedAiIds = validAiIds(people.map((person) => person.ai_id));
-  const aiList = detectedAiIds.concat(validAiIds(active?.ai_list || []).filter((id) => !detectedAiIds.includes(id)));
+  const aiList = detectedAiIds.length ? detectedAiIds : validAiIds(active?.ai_list || []);
   const sessionNames = people.length ? people.map((p) => p.name) : (Array.isArray(active?.names) ? active.names : []);
   if (!state.kindroidApiKey.startsWith('kn_')) { state.groupmakerOpen = true; state.groupmakerStatus = 'Enter a valid Kindroid API key first.'; render(); return; }
   if (!context) { state.groupmakerOpen = true; state.groupmakerStatus = 'Group context is required.'; render(); return; }
@@ -857,6 +915,7 @@ async function syncGroupmaker() {
   const locationByAiId = Object.fromEntries(people.filter((p) => state.groupmakerPosition || p.position).map((p) => [p.ai_id, state.groupmakerPosition || p.position]));
   const payload = { ai_list: aiList, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, share_short_term_memory: true, use_manual_turntaking: true, ...(active ? { group_id: active.group_id } : {}) };
   const toolKey = active ? 'group_update' : 'create_groupchat_current_discovery';
+  const priorActive = active ? { ...active, ai_list: [...validAiIds(active.ai_list || [])] } : null;
   closePriorGroupmakerTabs();
   const preparedTab = window.open('about:blank', '_blank');
   if (preparedTab) preparedTab.document.title = 'Opening Kindroid group…';
@@ -869,17 +928,19 @@ async function syncGroupmaker() {
     const now = new Date().toISOString();
     let target = active;
     if (active) {
-      Object.assign(target, { ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, share_short_term_memory: true, use_manual_turntaking: true, touched_at: now });
+      const automation = await runGroupmakerPresenceAutomations({ people, groupId: target.group_id, active: priorActive, aiList });
+      Object.assign(target, { ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, last_automation: { ...automation, ran_at: now } });
       const opened = openPreparedGroupmakerTab(preparedTab, target.group_id);
-      state.groupmakerStatus = `Updated active session (${result.status}). ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
+      state.groupmakerStatus = `Updated active session (${result.status}). Automation: ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
     } else {
       const groupId = extractGroupId(result.groupIdSource || result.detail);
       if (!groupId) throw new Error('Create succeeded, but no group_id could be parsed from the response.');
-      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, closed_at: '', idle_at: '' };
+      const automation = await runGroupmakerPresenceAutomations({ people, groupId, active: null, aiList });
+      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
       state.config.groupmaker_sessions = groupmakerSessions().filter((row) => row.group_id !== groupId).concat(target);
       state.config.groupmaker_active_session_key = groupId;
       const opened = openPreparedGroupmakerTab(preparedTab, groupId);
-      state.groupmakerStatus = `Created active session ${groupId} (${result.status}). ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(groupId)}`}`;
+      state.groupmakerStatus = `Created active session ${groupId} (${result.status}). Automation: ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(groupId)}`}`;
     }
     persistGroupmakerDraft();
     await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`);
