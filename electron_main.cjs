@@ -4,6 +4,8 @@ const crypto = require('crypto');
 
 const APP_ROOT = __dirname;
 const transcriptWindows = new Map();
+let mainWindow = null;
+let kindroidPanel = null;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -19,8 +21,42 @@ function createMainWindow() {
       nodeIntegration: false,
     },
   });
+  mainWindow = win;
+  win.on('closed', () => {
+    mainWindow = null;
+    if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.close();
+  });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
+}
+
+function kindroidPanelState() {
+  return { available: true, open: Boolean(kindroidPanel && !kindroidPanel.isDestroyed() && kindroidPanel.isVisible()) };
+}
+
+function sendKindroidPanelState() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifeline:kindroid-panel-state', kindroidPanelState());
+}
+
+function createKindroidPanel() {
+  if (kindroidPanel && !kindroidPanel.isDestroyed()) return kindroidPanel;
+  const ownerBounds = mainWindow?.getBounds() || { x: 100, y: 100, width: 1500, height: 940 };
+  kindroidPanel = new BrowserWindow({
+    width: 480, height: Math.min(820, ownerBounds.height),
+    x: ownerBounds.x + ownerBounds.width - 500, y: ownerBounds.y + 60,
+    minWidth: 380, minHeight: 520,
+    title: 'Kindroid · LIFELINE panel', parent: mainWindow || undefined,
+    show: false, autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, partition: 'persist:lifeline-kindroid' },
+  });
+  kindroidPanel.on('show', sendKindroidPanelState);
+  kindroidPanel.on('hide', sendKindroidPanelState);
+  kindroidPanel.on('closed', () => { kindroidPanel = null; sendKindroidPanelState(); });
+  kindroidPanel.webContents.setWindowOpenHandler(() => ({
+    action: 'allow',
+    overrideBrowserWindowOptions: { parent: kindroidPanel, autoHideMenuBar: true, webPreferences: { contextIsolation: true, nodeIntegration: false, partition: 'persist:lifeline-kindroid' } },
+  }));
+  return kindroidPanel;
 }
 
 function cleanGroupId(value) {
@@ -316,6 +352,20 @@ ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
   await win.loadURL(String(payload.url || 'https://kindroid.ai/'));
   return true;
 });
+
+ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
+  const panel = createKindroidPanel();
+  if (panel.isVisible()) panel.hide();
+  else {
+    panel.show();
+    panel.focus();
+    if (!panel.webContents.getURL()) await panel.loadURL('https://kindroid.ai/v2/kins/');
+  }
+  sendKindroidPanelState();
+  return kindroidPanelState();
+});
+
+ipcMain.handle('lifeline:get-kindroid-panel-state', () => kindroidPanelState());
 
 ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) => {
   const groupId = cleanGroupId(payload.groupId);

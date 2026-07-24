@@ -11,6 +11,21 @@ function ensureLifelineRoot() {
 
 const root = ensureLifelineRoot();
 
+if (window.lifelineElectron?.getKindroidPanelState) {
+  window.lifelineElectron.getKindroidPanelState().then((panelState) => {
+    state.kindroidPanelOpen = Boolean(panelState?.open);
+    if (state.authenticated) render();
+  });
+  window.lifelineElectron.onKindroidPanelState?.((panelState) => {
+    state.kindroidPanelOpen = Boolean(panelState?.open);
+    const button = document.querySelector('#kindroid-panel-toggle');
+    if (button) {
+      button.classList.toggle('active', state.kindroidPanelOpen);
+      button.querySelector('b').textContent = state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID';
+    }
+  });
+}
+
 const GITHUB_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -123,6 +138,7 @@ const state = {
   groupmakerContext: '',
   activeEntryTab: 'profile',
   settingsOpen: false,
+  kindroidPanelOpen: false,
 };
 
 function escapeHtml(value) {
@@ -797,7 +813,7 @@ function renderDirectory() {
   const current = selectedEntry();
   const onlineLabel = current?.online ? 'Available now' : 'Standing by';
   const editorContent = state.activeView === 'world' ? renderWorldView() : renderDirectoryWorkspace(current, onlineLabel);
-  root.innerHTML = `<main class="app-shell"><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="world-view" class="ghost ${state.activeView === 'world' ? 'active' : ''}" type="button">Home</button><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}</main>`;
+  root.innerHTML = `<main class="app-shell"><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="world-view" class="ghost ${state.activeView === 'world' ? 'active' : ''}" type="button">Home</button><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button><button id="kindroid-panel-toggle" class="kindroid-panel-button ${state.kindroidPanelOpen ? 'active' : ''}" title="Open the Kindroid website in a floating desktop panel"><span>K</span><b>${state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID'}</b><small>kindroid.ai/v2/kins</small></button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}</main>`;
   bindDirectoryEvents();
 }
 
@@ -1084,6 +1100,15 @@ function bindDirectoryEvents() {
   document.querySelector('#file')?.addEventListener('change', importLegacyFile);
   document.querySelector('#groupmaker-toggle').addEventListener('click', () => { state.groupmakerOpen = !state.groupmakerOpen; render(); });
   document.querySelector('#api-studio-toggle')?.addEventListener('click', () => { state.apiStudioOpen = !state.apiStudioOpen; render(); });
+  document.querySelector('#kindroid-panel-toggle')?.addEventListener('click', async () => {
+    if (!window.lifelineElectron?.toggleKindroidPanel) {
+      window.open('https://kindroid.ai/v2/kins/', '_blank', 'popup,width=480,height=820');
+      return;
+    }
+    const result = await window.lifelineElectron.toggleKindroidPanel();
+    state.kindroidPanelOpen = Boolean(result?.open);
+    render();
+  });
   document.querySelector('#api-close')?.addEventListener('click', () => { state.apiStudioOpen = false; render(); });
   document.querySelectorAll('.api-cat').forEach((button) => button.addEventListener('click', () => { state.apiStudioCategory = button.dataset.cat; const first = listKindroidOperations({ category: state.apiStudioCategory, includeExperimental: state.apiStudioShowExperimental })[0]; if (first) state.apiStudioOperationKey = first.key; render(); }));
   document.querySelectorAll('.api-op').forEach((button) => button.addEventListener('click', () => { state.apiStudioOperationKey = button.dataset.op; render(); }));
