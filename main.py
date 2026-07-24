@@ -23,6 +23,8 @@ ELECTRON_PRELOAD_PATH = APP_ROOT / "electron_preload.cjs"
 INDEX_PATH = APP_ROOT / "index.html"
 ELECTRON_VERSION = "32.2.7"
 ELECTRON_CACHE = APP_ROOT / ".lifeline_electron" / f"electron-v{ELECTRON_VERSION}"
+WINDOWS_STATUS_DLL_NOT_FOUND = 0xC0000135
+
 
 
 def _ensure_frontend_entrypoint() -> None:
@@ -104,10 +106,29 @@ def _electron_executable() -> Path:
     return _env_electron() or _node_modules_electron() or _cached_electron_executable() or _download_electron()
 
 
+def _run_electron(electron: Path) -> None:
+    subprocess.check_call([str(electron), str(ELECTRON_MAIN_PATH)], cwd=APP_ROOT)
+
+
+def _is_windows_dll_load_failure(error: subprocess.CalledProcessError) -> bool:
+    return sys.platform == "win32" and error.returncode == WINDOWS_STATUS_DLL_NOT_FOUND
+
+
 def main() -> None:
     _ensure_frontend_entrypoint()
     electron = _electron_executable()
-    subprocess.check_call([str(electron), str(ELECTRON_MAIN_PATH)], cwd=APP_ROOT)
+    try:
+        _run_electron(electron)
+    except subprocess.CalledProcessError as error:
+        if not _is_windows_dll_load_failure(error) or not str(electron).startswith(str(ELECTRON_CACHE)):
+            raise
+        print(
+            "Cached Electron failed to start because a required Windows DLL was missing. "
+            "Re-downloading the bundled Electron runtime and retrying once…",
+            file=sys.stderr,
+        )
+        fresh_electron = _download_electron()
+        _run_electron(fresh_electron)
 
 
 if __name__ == "__main__":
