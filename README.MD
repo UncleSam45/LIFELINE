@@ -13,6 +13,7 @@ LIFELINE is a browser-based directory and operations console for a Kindroid rost
 - **Family maps** — records parent/child relationships and household notes alongside directory entries.
 - **GROUPMAKER** — detects roster members by name, creates or updates Kindroid groups, tracks sessions, and runs presence automations.
 - **Kindroid API Studio** — validates and executes registered official and experimental API operations, shows request previews and normalized responses, and supports transcript retrieval.
+- **Kindroid web panel** — opens the Kindroid Kins page in a floating, minimizable window that can also dock inside LIFELINE, with a one-click external-tab fallback when Kindroid's embed policy or browser privacy settings block the frame.
 - **Responsive interface** — runs as a standalone static page or through the included NiceGUI launcher.
 
 ## Requirements
