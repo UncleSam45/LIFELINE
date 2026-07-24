@@ -25,11 +25,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 
 class DependencyInstaller:
-    REQUIRED = {"PySide6": "PySide6", "requests": "requests", "watchdog": "watchdog", "psutil": "psutil"}
+    REQUIRED = {"PySide6": "PySide6", "requests": "requests", "watchdog": "watchdog"}
     OPTIONAL = {"jsonschema": "jsonschema"}
 
     @classmethod
@@ -44,7 +44,6 @@ class DependencyInstaller:
 
 DependencyInstaller.ensure()
 
-import psutil  # noqa: E402
 import requests  # noqa: E402
 from PySide6.QtCore import QObject, QSharedMemory, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
 from PySide6.QtGui import QAction, QFont, QIcon  # noqa: E402
@@ -87,7 +86,92 @@ RESTORE_SOURCE_USED = "none"
 DEFAULT_TRANSCRIPT_FOLDER = APP_ROOT / "KINDROIDXL" / "transcripts"
 VALID_TYPES = {"fact", "event", "plan", "preference", "relationship", "status", "lore", "project"}
 KINDROID_REQUESTER = "LIFELINE-MEMORY-MANAGER-CONTEXT-REMINDER"
+BRIDGE_OWNER = os.environ.get("LIFELINE_BRIDGE_OWNER", "unclesam45")
+BRIDGE_REPO = os.environ.get("LIFELINE_BRIDGE_REPO", "LIFELINE_BRIDGE")
+BRIDGE_BRANCH = os.environ.get("LIFELINE_BRIDGE_BRANCH", "main")
+BRIDGE_TOKEN_ENV_KEYS = ("LIFELINE_BRIDGE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+BRIDGE_MEMORY_LATEST_PATH = "memory/lifeline_memory.latest.db"
+BRIDGE_MEMORY_SNAPSHOT_ROOT = "memory/snapshots"
+BRIDGE_TRANSCRIPT_ROOT = "transcripts"
 _INSTANCE_GUARD = None
+
+
+def _bridge_token() -> str:
+    for key in BRIDGE_TOKEN_ENV_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+class GitHubBridge:
+    """Small GitHub Contents API client shared by transcript restore and DB backups."""
+
+    def __init__(self) -> None:
+        self.token = _bridge_token()
+        self.base = f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}/contents"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token)
+
+    def _headers(self) -> Dict[str, str]:
+        return {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self.token}", "X-GitHub-Api-Version": "2022-11-28"}
+
+    def _url(self, path: str, ref: bool = True) -> str:
+        suffix = f"?ref={BRIDGE_BRANCH}" if ref else ""
+        return f"{self.base}/{quote(path.strip('/'))}{suffix}"
+
+    def read_bytes(self, path: str) -> Tuple[bytes, str]:
+        if not self.enabled:
+            raise RuntimeError("No GitHub bridge token configured")
+        response = requests.get(self._url(path), headers=self._headers(), timeout=30)
+        if response.status_code == 404:
+            return b"", ""
+        response.raise_for_status()
+        payload = response.json()
+        content = str(payload.get("content") or "").replace("\n", "")
+        return (base64.b64decode(content) if content else b""), str(payload.get("sha") or "")
+
+    def write_bytes(self, path: str, data: bytes, message: str) -> None:
+        if not self.enabled:
+            return
+        _old, sha = self.read_bytes(path)
+        body = {"message": message, "branch": BRIDGE_BRANCH, "content": base64.b64encode(data).decode("ascii")}
+        if sha:
+            body["sha"] = sha
+        response = requests.put(self._url(path, ref=False), headers=self._headers(), json=body, timeout=45)
+        response.raise_for_status()
+
+    def list_tree(self, path: str) -> List[Dict[str, Any]]:
+        if not self.enabled:
+            return []
+        response = requests.get(self._url(path), headers=self._headers(), timeout=30)
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, list) else []
+
+    def download_transcripts(self, target_folder: Path) -> int:
+        count = 0
+        for group in self.list_tree(BRIDGE_TRANSCRIPT_ROOT):
+            if group.get("type") != "dir":
+                continue
+            group_name = str(group.get("name") or "unknown")
+            for item in self.list_tree(f"{BRIDGE_TRANSCRIPT_ROOT}/{group_name}"):
+                if item.get("type") != "file" or not str(item.get("name") or "").endswith(".txt"):
+                    continue
+                data, _sha = self.read_bytes(str(item.get("path")))
+                if not data:
+                    continue
+                target = target_folder / f"{group_name}_{item.get('name')}"
+                old = target.read_bytes() if target.exists() else b""
+                if old == data:
+                    continue
+                target.write_bytes(data)
+                count += 1
+        return count
 
 GENERIC_KEYWORDS = {
     "week", "today", "tomorrow", "yesterday", "thing", "things", "discussion", "talk", "chat",
@@ -113,23 +197,6 @@ MEMORY_ACTION_PATTERN = re.compile(
 )
 
 
-def _script_path_from_args(flag: str) -> Optional[Path]:
-    try:
-        index = sys.argv.index(flag)
-        return Path(sys.argv[index + 1]).resolve()
-    except (ValueError, IndexError, OSError):
-        return None
-
-
-def _pid_from_args(flag: str) -> Optional[int]:
-    try:
-        index = sys.argv.index(flag)
-        pid = int(sys.argv[index + 1])
-    except (ValueError, IndexError):
-        return None
-    return pid if pid > 0 else None
-
-
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help="--help" in argv or "-h" in argv)
     parser.add_argument("--auto-start", action="store_true")
@@ -141,62 +208,10 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return args
 
 
-def _same_script_path(candidate: object, expected: Path) -> bool:
-    try:
-        return Path(str(candidate)).resolve() == expected
-    except (OSError, RuntimeError, ValueError):
-        return str(candidate) == str(expected)
-
-
-def _process_cmdline_has_script(process: psutil.Process, script_path: Path) -> bool:
-    try:
-        cmdline = process.cmdline()
-    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-        return False
-    return any(_same_script_path(part, script_path) for part in cmdline)
-
-
-def _main_process_is_running(main_pid: Optional[int], main_script: Path) -> bool:
-    if main_pid is not None:
-        try:
-            process = psutil.Process(main_pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return False
-        if process.pid == os.getpid() or not process.is_running():
-            return False
-        return _process_cmdline_has_script(process, main_script)
-
-    current_pid = os.getpid()
-    for process in psutil.process_iter(["pid"]):
-        if process.info.get("pid") == current_pid:
-            continue
-        if _process_cmdline_has_script(process, main_script):
-            return True
-    return False
-
-
-class MainProcessMonitor(QObject):
-    """Close the memory manager when the owning main.py process is gone."""
-
-    def __init__(self, app: QApplication, main_pid: Optional[int], main_script: Path) -> None:
-        super().__init__(app)
-        self.app = app
-        self.main_pid = main_pid
-        self.main_script = main_script
-        self.timer = QTimer(self)
-        self.timer.setInterval(2000)
-        self.timer.timeout.connect(self.close_if_main_missing)
-
-    def start(self) -> None:
-        self.timer.start()
-
-    @Slot()
-    def close_if_main_missing(self) -> None:
-        if not _main_process_is_running(self.main_pid, self.main_script):
-            print("[INFO] main.py is no longer running; closing LIFELINE Memory Manager.")
-            self.timer.stop()
-            self.app.quit()
-
+# ``--main-pid`` and ``--main-script`` remain accepted for compatibility with
+# older launchers, but the memory manager is intentionally standalone now.
+# It must keep running even when the Electron frontend/main.py is not open so it
+# can process bridge transcripts and restore/backup its database independently.
 
 def now_iso() -> str:
     return _dt.datetime.now().replace(microsecond=0).isoformat()
@@ -427,8 +442,10 @@ class MemoryDB:
         self.last_snapshot = "never"
         self.restore_source = RESTORE_SOURCE_USED
         self.lock = threading.RLock()
+        self.bridge = GitHubBridge()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.memory_backup_root.mkdir(parents=True, exist_ok=True)
+        self._restore_from_bridge_if_better()
         self._recover_from_legacy_database()
         self.init_schema()
         print(f"[LIFELINE DB] using database: {self.path}")
@@ -471,6 +488,28 @@ class MemoryDB:
             f"({legacy_score} legacy rows vs {active_score} active rows): {self.path}"
         )
 
+
+    def _restore_from_bridge_if_better(self) -> None:
+        if not self.bridge.enabled:
+            return
+        try:
+            data, _sha = self.bridge.read_bytes(BRIDGE_MEMORY_LATEST_PATH)
+            if not data:
+                return
+            candidate = self.path.with_suffix(".bridge-download.db")
+            candidate.write_bytes(data)
+            if not self.integrity_ok(candidate):
+                candidate.unlink(missing_ok=True)
+                return
+            if self._database_score(candidate) >= self._database_score(self.path):
+                candidate.replace(self.path)
+                self.restore_source = f"github:{BRIDGE_MEMORY_LATEST_PATH}"
+                print(f"[LIFELINE DB] restored memory database from GitHub bridge: {BRIDGE_MEMORY_LATEST_PATH}")
+            else:
+                candidate.unlink(missing_ok=True)
+        except Exception as exc:
+            print(f"[LIFELINE DB] GitHub restore skipped: {exc}")
+
     def integrity_ok(self, path: Optional[Path] = None) -> bool:
         target = path or self.path
         try:
@@ -506,6 +545,12 @@ class MemoryDB:
             snapshot_msg = str(snapshot)
             print(f"[LIFELINE DB] backup snapshot created: {snapshot}")
             self._rotate_memory_backups()
+        if self.bridge.enabled:
+            data = self.latest_mirror_path.read_bytes()
+            self.bridge.write_bytes(BRIDGE_MEMORY_LATEST_PATH, data, "Back up latest LIFELINE memory database")
+            if create_snapshot:
+                stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.bridge.write_bytes(f"{BRIDGE_MEMORY_SNAPSHOT_ROOT}/lifeline_memory_{stamp}.db", data, "Snapshot LIFELINE memory database")
         return True, snapshot_msg
 
     def _rotate_memory_backups(self, keep: int = 288) -> None:
@@ -1117,6 +1162,7 @@ class ProcessingWorker(QObject):
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event(); self.observer = None
         self.queue: "queue.Queue[Path]" = queue.Queue(); self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.seen_sizes: Dict[Path, int] = {}; self.read_retry_log_at: Dict[Path, float] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
+        self.bridge = GitHubBridge(); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
     @Slot(str)
     def start(self, folder: str) -> None:
@@ -1140,6 +1186,17 @@ class ProcessingWorker(QObject):
             except queue.Empty: pass
             if self.buffer.should_flush(idle): self.process_one()
             if not self.cleanup_queue.empty(): self.clean_one()
+            now_ts = time.time()
+            if self.bridge.enabled and now_ts >= self.next_bridge_sync:
+                try:
+                    changed = self.bridge.download_transcripts(Path(self.settings.get('transcript_folder')))
+                    if changed: self.log.emit(f"Pulled {changed} transcript file(s) from GitHub bridge.")
+                except Exception as exc: self.log.emit(f"GitHub transcript sync skipped: {exc}")
+                self.next_bridge_sync = now_ts + 60
+            if now_ts >= self.next_bridge_backup:
+                try: self.db.mirror_to_external_backup(create_snapshot=True)
+                except Exception as exc: self.log.emit(f"Memory database bridge backup skipped: {exc}")
+                self.next_bridge_backup = now_ts + 180
             self.monitor.emit({"buffered": self.buffer.size, "pending": self.queue.qsize(), "files": len(self.seen_sizes)})
         self.stop()
 
@@ -1781,16 +1838,6 @@ def main() -> int:
     RUNTIME_BACKUP_ROOT = Path(args.backup_root).expanduser().resolve() if args.backup_root else DEFAULT_BACKUP_ROOT
     app = QApplication(sys.argv); app.setApplicationName('LIFELINE Memory Manager')
     app.setQuitOnLastWindowClosed(False)
-    main_script = Path(args.main_script).resolve() if args.main_script else Path(__file__).with_name("main.py").resolve()
-    main_pid = args.main_pid
-    if not _main_process_is_running(main_pid, main_script):
-        message = "LIFELINE Memory Manager can only run while main.py is open."
-        if not args.auto_start:
-            QMessageBox.warning(None, "Open KINDROIDXL first", message)
-        else:
-            print(f"[INFO] {message}")
-        return 0
-
     global _INSTANCE_GUARD
     instance_guard = QSharedMemory("LIFELINE_MEMORY_MANAGER_SINGLE_INSTANCE_GUARD")
     if not instance_guard.create(1):
@@ -1805,9 +1852,6 @@ def main() -> int:
     _INSTANCE_GUARD = instance_guard
 
     w = MainWindow()
-    main_monitor = MainProcessMonitor(app, main_pid, main_script)
-    main_monitor.start()
-    app._lifeline_main_monitor = main_monitor
     if args.auto_start:
         QTimer.singleShot(500, w.start_watch)
         if w.tray_icon:
