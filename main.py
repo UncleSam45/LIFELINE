@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -24,6 +26,7 @@ INDEX_PATH = APP_ROOT / "index.html"
 ELECTRON_VERSION = "32.2.7"
 ELECTRON_CACHE = APP_ROOT / ".lifeline_electron" / f"electron-v{ELECTRON_VERSION}"
 WINDOWS_STATUS_DLL_NOT_FOUND = 0xC0000135
+ELECTRON_SHUTDOWN_TIMEOUT_SECONDS = 5
 
 
 
@@ -106,6 +109,65 @@ def _electron_executable() -> Path:
     return _env_electron() or _node_modules_electron() or _cached_electron_executable() or _download_electron()
 
 
+def _existing_electron_pids() -> list[int]:
+    """Return Electron processes that are running this LIFELINE entrypoint."""
+    entrypoint = str(ELECTRON_MAIN_PATH)
+    if sys.platform == "win32":
+        escaped_entrypoint = entrypoint.replace("'", "''")
+        command = (
+            "Get-CimInstance Win32_Process -Filter \"Name = 'electron.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{escaped_entrypoint}') }} | "
+            "ForEach-Object { $_.ProcessId }"
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Could not inspect existing Electron processes: {result.stderr.strip()}")
+        candidates = result.stdout.splitlines()
+    else:
+        result = subprocess.run(["pgrep", "-f", entrypoint], check=False, capture_output=True, text=True)
+        if result.returncode not in (0, 1):
+            raise RuntimeError(f"Could not inspect existing Electron processes: {result.stderr.strip()}")
+        candidates = result.stdout.splitlines()
+
+    return [pid for value in candidates if value.strip().isdigit() and (pid := int(value)) != os.getpid()]
+
+
+def _terminate_existing_electron_instances() -> None:
+    """Stop prior LIFELINE Electron processes before launching a replacement."""
+    pids = _existing_electron_pids()
+    if not pids:
+        return
+
+    print(f"Stopping {len(pids)} existing LIFELINE Electron process(es)…")
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + ELECTRON_SHUTDOWN_TIMEOUT_SECONDS
+    remaining = set(pids)
+    while remaining and time.monotonic() < deadline:
+        for pid in tuple(remaining):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                remaining.remove(pid)
+        if remaining:
+            time.sleep(0.1)
+
+    for pid in remaining:
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except ProcessLookupError:
+            pass
+
+
 def _run_electron(electron: Path) -> None:
     subprocess.check_call([str(electron), str(ELECTRON_MAIN_PATH)], cwd=APP_ROOT)
 
@@ -117,6 +179,7 @@ def _is_windows_dll_load_failure(error: subprocess.CalledProcessError) -> bool:
 def main() -> None:
     _ensure_frontend_entrypoint()
     electron = _electron_executable()
+    _terminate_existing_electron_instances()
     try:
         _run_electron(electron)
     except subprocess.CalledProcessError as error:

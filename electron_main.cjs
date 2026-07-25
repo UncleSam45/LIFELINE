@@ -11,6 +11,9 @@ const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
 let kindroidSessionReady = null;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) app.quit();
 
 function kindroidWebPreferences() {
   return { contextIsolation: true, nodeIntegration: false, partition: KINDROID_PARTITION };
@@ -514,5 +517,5 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
   }
 });
 
-app.whenReady().then(createMainWindow);
+if (hasSingleInstanceLock) app.whenReady().then(createMainWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
