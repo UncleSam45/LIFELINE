@@ -937,7 +937,7 @@ async function fetchGroupmakerTranscript() {
     if (!result?.ok) throw new Error(`${result?.stage || 'unknown'}: ${result?.message || 'Transcript capture failed.'}`);
     session.last_transcript_capture = { captured_at: result.capturedAt, repo_path: result.repoPath, entries_found: result.bubblesFound, new_entries: result.newEntries, total_entries: result.totalEntries, participants_present: [...participants] };
     session.touched_at = result.capturedAt;
-    state.groupmakerTranscriptStatus = `Transcript saved for ${result.groupName || 'GROUPMAKER group'}.\nGroup: ${result.groupId}\nParticipants: ${result.participants.join(', ') || '—'}\nDOM entries found: ${result.bubblesFound}\nNew entries saved: ${result.newEntries}\nTotal stored entries: ${result.totalEntries}\nPath: ${result.repoPath}`;
+    state.groupmakerTranscriptStatus = `Transcript saved for ${result.groupName || 'GROUPMAKER group'}.\nGroup: ${result.groupId}\nParticipants: ${result.participants.join(', ') || '—'}\nExtraction method: ${result.selectorUsed || 'unknown'}\nEntries found: ${result.bubblesFound}\nNew entries saved: ${result.newEntries}\nTotal stored entries: ${result.totalEntries}\nPath: ${result.repoPath}`;
     await saveBridgeQuiet('GROUPMAKER transcript metadata');
   } catch (error) {
     state.groupmakerTranscriptStatus = `Transcript capture failed at ${String(error.message || error).replace(/^([^:]+):/, '$1:')}`;
