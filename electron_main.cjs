@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 
@@ -270,6 +270,44 @@ function extractionScript() {
   }))();`;
 }
 
+async function copyWholePage(win) {
+  const previousClipboard = clipboard.readText();
+  try {
+    clipboard.clear();
+    win.show();
+    win.focus();
+    win.webContents.focus();
+    const modifier = process.platform === 'darwin' ? 'meta' : 'control';
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: [modifier] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: [modifier] });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'C', modifiers: [modifier] });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'C', modifiers: [modifier] });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return clipboard.readText();
+  } finally {
+    clipboard.writeText(previousClipboard);
+    await win.webContents.executeJavaScript('window.getSelection()?.removeAllRanges()', true).catch(() => {});
+  }
+}
+
+function selectionTextToBubbles(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map(normalizeText)
+    .filter(Boolean);
+  const rows = [];
+  for (const line of lines) {
+    if (rows.at(-1)?.text === line) continue;
+    rows.push({ text: line, domIndex: rows.length, messageId: '', timestamp: '', speaker: '' });
+  }
+  rows.forEach((row, index) => {
+    row.previousText = rows[index - 1]?.text || '';
+    row.nextText = rows[index + 1]?.text || '';
+  });
+  return rows;
+}
+
 function getTranscriptWindow(groupId) {
   const existing = transcriptWindows.get(groupId);
   if (existing && !existing.isDestroyed()) return existing;
@@ -339,7 +377,7 @@ async function navigateTranscriptWindow(win, sourceUrl, groupId) {
 }
 
 async function waitForBubbles(win) {
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 5; i += 1) {
     const count = await win.webContents.executeJavaScript(`document.querySelectorAll('p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable, p.chat-bubble-v2_bubble-text__QUcZ9, p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable, p[class*="chat-bubble-v2_bubble-text"], p.v2-message-selectable').length`, true);
     if (count > 0) return count;
     await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -384,9 +422,18 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
       return failure('authentication', 'Kindroid authentication is required before a transcript can be captured.', { groupId, sourceUrl });
     }
     await waitForBubbles(win);
+    // A real Select All + Copy is deliberately used as a resilient fallback:
+    // unlike CSS selectors, it continues to work when Kindroid renames or
+    // restructures its message components.
+    const selectedPageText = await copyWholePage(win);
     const extracted = await win.webContents.executeJavaScript(extractionScript(), true);
     if (!extracted || !Array.isArray(extracted.bubbles)) return failure('dom_extraction', 'Transcript extraction returned an invalid payload.', { groupId, sourceUrl });
-    if (!extracted.bubbles.length) return failure('dom_wait', 'No transcript bubbles were found. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
+    if (!extracted.bubbles.length) {
+      extracted.bubbles = selectionTextToBubbles(selectedPageText);
+      extracted.bubblesFound = extracted.bubbles.length;
+      extracted.selectorUsed = 'keyboard-select-all-copy';
+    }
+    if (!extracted.bubbles.length) return failure('selection_extraction', 'Select All + Copy did not find transcript text. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
     const merged = await saveMergedTranscript(token, repoPath, { groupId, groupName, participants, capturedAt, sourceUrl, bubbles: extracted.bubbles });
     return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: extracted.selectorUsed, scrollAttempts: extracted.scrollAttempts, bubblesFound: extracted.bubblesFound, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
   } catch (error) {
