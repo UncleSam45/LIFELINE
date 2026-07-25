@@ -9,6 +9,15 @@ let kindroidPanel = null;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
+const KINDROID_PARTITION = 'persist:lifeline-kindroid';
+
+function kindroidWebPreferences() {
+  return { contextIsolation: true, nodeIntegration: false, partition: KINDROID_PARTITION };
+}
+
+function isBlankPage(url) {
+  return !url || url === 'about:blank';
+}
 
 function createMainWindow() {
   const win = new BrowserWindow({
@@ -47,14 +56,14 @@ function createKindroidPanel() {
     minWidth: 380, minHeight: 520,
     title: 'Kindroid · LIFELINE panel', parent: mainWindow || undefined,
     show: false, autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, partition: 'persist:lifeline-kindroid' },
+    webPreferences: kindroidWebPreferences(),
   });
   kindroidPanel.on('show', sendKindroidPanelState);
   kindroidPanel.on('hide', sendKindroidPanelState);
   kindroidPanel.on('closed', () => { kindroidPanel = null; sendKindroidPanelState(); });
   kindroidPanel.webContents.setWindowOpenHandler(() => ({
     action: 'allow',
-    overrideBrowserWindowOptions: { parent: kindroidPanel, autoHideMenuBar: true, webPreferences: { contextIsolation: true, nodeIntegration: false, partition: 'persist:lifeline-kindroid' } },
+    overrideBrowserWindowOptions: { parent: kindroidPanel, autoHideMenuBar: true, webPreferences: kindroidWebPreferences() },
   }));
   return kindroidPanel;
 }
@@ -98,6 +107,46 @@ function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+const LOGIN_PAGE_MARKERS = [
+  'choose your login method',
+  'continue with google',
+  'continue with apple',
+  'by continuing, you agree to the',
+];
+
+const TRANSCRIPT_PAGE_LABELS = new Set([
+  'voice call',
+  'message from you',
+  'kindroid - your personal artificial intelligence companion',
+]);
+
+function isLoginPageText(text) {
+  const normalized = normalizeText(text).toLowerCase();
+  return LOGIN_PAGE_MARKERS.filter((marker) => normalized.includes(marker)).length >= 2;
+}
+
+function isTranscriptPageNoise(text) {
+  const normalized = normalizeText(text).toLowerCase();
+  return TRANSCRIPT_PAGE_LABELS.has(normalized)
+    || /^message from\s+[^\n]+$/i.test(normalized)
+    || /^(?:\d+\s*[hms]\s*){1,3}$/i.test(normalized);
+}
+
+function removeStoredPageNoise(entries) {
+  const rows = Array.isArray(entries) ? entries : [];
+  const loginCaptureTimes = new Set();
+  const byCapture = new Map();
+  for (const entry of rows) {
+    const capturedAt = normalizeText(entry?.first_captured_at);
+    if (!byCapture.has(capturedAt)) byCapture.set(capturedAt, []);
+    byCapture.get(capturedAt).push(entry);
+  }
+  for (const [capturedAt, capturedRows] of byCapture) {
+    if (isLoginPageText(capturedRows.map((entry) => entry?.text).join('\n'))) loginCaptureTimes.add(capturedAt);
+  }
+  return rows.filter((entry) => !loginCaptureTimes.has(normalizeText(entry?.first_captured_at)) && !isTranscriptPageNoise(entry?.text));
+}
+
 function stableEntryId(groupId, bubble, occurrence) {
   const id = normalizeText(bubble.messageId);
   if (id) return `dom:${id}`;
@@ -131,7 +180,7 @@ function mergeTranscript(existing, { groupId, groupName, participants, capturedA
     group_name: groupName || base.group_name || '',
     created_at: base.created_at || capturedAt,
     updated_at: capturedAt,
-    entries: Array.isArray(base.entries) ? base.entries : [],
+    entries: removeStoredPageNoise(base.entries),
     captures: Array.isArray(base.captures) ? base.captures : [],
   };
   const existingIds = new Set(doc.entries.map((entry) => String(entry.entry_id || '')));
@@ -188,92 +237,66 @@ async function saveMergedTranscript(token, repoPath, mergeInput) {
   }
 }
 
-function extractionScript() {
-  return `(() => new Promise(async (resolve) => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const clean = (v) => String(v || '').replace(/\\s+/g, ' ').trim();
-    const selectors = [
-      'p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable',
-      'p.chat-bubble-v2_bubble-text__QUcZ9',
-      'p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable',
-      'p[class*="chat-bubble-v2_bubble-text"]',
-      'p.v2-message-selectable',
-    ];
-    const visible = (node) => {
-      const rect = node.getBoundingClientRect?.();
-      const style = node.ownerDocument.defaultView.getComputedStyle(node);
-      return (!rect || rect.width || rect.height) && style.display !== 'none' && style.visibility !== 'hidden';
-    };
-    const rootsForDocument = (doc) => {
-      const roots = [doc];
-      const walk = doc.createTreeWalker(doc.documentElement, NodeFilter.SHOW_ELEMENT);
-      let node = walk.currentNode;
-      while (node) {
-        if (node.shadowRoot) roots.push(node.shadowRoot);
-        node = walk.nextNode();
-      }
-      return roots;
-    };
-    const documents = () => {
-      const docs = [document];
-      for (const frame of [...document.querySelectorAll('iframe')]) {
-        try { if (frame.contentDocument) docs.push(frame.contentDocument); } catch (_error) {}
-      }
-      return docs;
-    };
-    const queryAllDeep = (selector) => {
-      const out = [];
-      for (const doc of documents()) {
-        for (const root of rootsForDocument(doc)) out.push(...root.querySelectorAll(selector));
-      }
-      return [...new Set(out)];
-    };
-    const findBubbles = () => {
-      for (const selector of selectors) {
-        const nodes = queryAllDeep(selector).filter((node) => clean(node.innerText || node.textContent) && visible(node));
-        if (nodes.length) return { selector, nodes };
-      }
-      return { selector: '', nodes: [] };
-    };
-    const scrollParent = (node) => {
-      let cur = node && node.parentElement;
-      while (cur && cur !== node.ownerDocument.body) {
-        const style = node.ownerDocument.defaultView.getComputedStyle(cur);
-        if (/(auto|scroll)/.test(style.overflowY) && cur.scrollHeight > cur.clientHeight + 20) return cur;
-        cur = cur.parentElement;
-      }
-      return node?.ownerDocument?.scrollingElement || document.scrollingElement || document.documentElement;
-    };
-    let found = findBubbles();
-    let container = scrollParent(found.nodes[0]);
-    let stable = 0, attempts = 0, lastCount = -1, lastHeight = -1;
-    while (attempts < 40 && stable < 3) {
-      found = findBubbles();
-      container = scrollParent(found.nodes[0]) || container;
-      const height = container ? container.scrollHeight : document.documentElement.scrollHeight;
-      if (found.nodes.length === lastCount && height === lastHeight) stable += 1; else stable = 0;
-      lastCount = found.nodes.length; lastHeight = height; attempts += 1;
-      if (container) container.scrollTop = 0; else window.scrollTo(0, 0);
-      await sleep(850);
+async function selectWholePageText(win) {
+  win.show();
+  win.focus();
+  win.webContents.focus();
+  await win.webContents.executeJavaScript('document.activeElement?.blur(); document.body?.focus()', true);
+  const modifier = process.platform === 'darwin' ? 'meta' : 'control';
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: [modifier] });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: [modifier] });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  try {
+    const selectedText = await win.webContents.executeJavaScript('window.getSelection()?.toString() || ""', true);
+    return String(selectedText || '');
+  } finally {
+    await win.webContents.executeJavaScript('window.getSelection()?.removeAllRanges()', true).catch(() => {});
+  }
+}
+
+function selectionTextToBubbles(text) {
+  const lines = String(text || '').split(/\r?\n/).map(normalizeText);
+  const rows = [];
+  let speaker = '';
+  let messageParts = [];
+  let sawMessageHeader = false;
+  const flush = () => {
+    const message = normalizeText(messageParts.join(' '));
+    messageParts = [];
+    if (!message || rows.at(-1)?.text === message) return;
+    rows.push({ text: message, domIndex: rows.length, messageId: '', timestamp: '', speaker });
+  };
+  for (const line of lines) {
+    const header = line.match(/^message from\s+(.+)$/i);
+    if (header) {
+      flush();
+      speaker = normalizeText(header[1]);
+      sawMessageHeader = true;
+      continue;
     }
-    found = findBubbles();
-    const nodes = found.nodes;
-    const rows = nodes.map((node, domIndex) => {
-      const wrapper = node.closest('[data-message-id], [data-id], [data-testid], [id], [data-index]') || node.parentElement;
-      const pick = (el, attrs) => attrs.map((a) => el?.getAttribute?.(a)).find((v) => clean(v));
-      const timeEl = wrapper?.querySelector?.('time,[datetime],[data-time],[data-timestamp]') || node.closest('time,[datetime]');
-      const speakerEl = wrapper?.querySelector?.('[data-speaker],[data-display-name],[class*="speaker" i],[class*="display-name" i],[class*="name" i]');
-      return { text: clean(node.innerText || node.textContent), domIndex, messageId: clean(pick(node, ['data-message-id','data-id','data-testid','id','data-index']) || pick(wrapper, ['data-message-id','data-id','data-testid','id','data-index'])), timestamp: clean(timeEl?.getAttribute?.('datetime') || timeEl?.getAttribute?.('data-time') || timeEl?.getAttribute?.('data-timestamp') || timeEl?.textContent), speaker: clean(speakerEl?.getAttribute?.('data-speaker') || speakerEl?.getAttribute?.('data-display-name') || speakerEl?.textContent) };
-    });
-    rows.forEach((row, i) => { row.previousText = rows[i - 1]?.text || ''; row.nextText = rows[i + 1]?.text || ''; });
-    resolve({ selectorUsed: found.selector, scrollAttempts: attempts, bubblesFound: rows.length, oldestTextPreview: rows[0]?.text?.slice(0, 120) || '', newestTextPreview: rows[rows.length - 1]?.text?.slice(0, 120) || '', bubbles: rows });
-  }))();`;
+    if (!line || isTranscriptPageNoise(line)) continue;
+    // Once headers are present, text before the first header is page chrome,
+    // not a transcript message. Each header starts one complete message and
+    // all of its wrapped/paragraph lines remain together until the next one.
+    if (sawMessageHeader || speaker) messageParts.push(line);
+  }
+  flush();
+
+  if (!sawMessageHeader) {
+    const selectedText = normalizeText(lines.filter((line) => line && !isTranscriptPageNoise(line)).join(' '));
+    if (selectedText) rows.push({ text: selectedText, domIndex: 0, messageId: '', timestamp: '', speaker: '' });
+  }
+  rows.forEach((row, index) => {
+    row.previousText = rows[index - 1]?.text || '';
+    row.nextText = rows[index + 1]?.text || '';
+  });
+  return rows;
 }
 
 function getTranscriptWindow(groupId) {
   const existing = transcriptWindows.get(groupId);
   if (existing && !existing.isDestroyed()) return existing;
-  const win = new BrowserWindow({ width: 1280, height: 900, title: `Kindroid transcript ${groupId}`, show: true, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+  const win = new BrowserWindow({ width: 1280, height: 900, title: `Kindroid transcript ${groupId}`, show: true, webPreferences: kindroidWebPreferences() });
   win.on('closed', () => transcriptWindows.delete(groupId));
   transcriptWindows.set(groupId, win);
   return win;
@@ -338,17 +361,8 @@ async function navigateTranscriptWindow(win, sourceUrl, groupId) {
   throw Object.assign(lastError || new Error(`Could not load ${sourceUrl}`), { stage: 'navigation' });
 }
 
-async function waitForBubbles(win) {
-  for (let i = 0; i < 30; i += 1) {
-    const count = await win.webContents.executeJavaScript(`document.querySelectorAll('p.chat-bubble-v2_bubble-text__QUcZ9.v2-message-selectable, p.chat-bubble-v2_bubble-text__QUcZ9, p[class*="chat-bubble-v2_bubble-text"].v2-message-selectable, p[class*="chat-bubble-v2_bubble-text"], p.v2-message-selectable').length`, true);
-    if (count > 0) return count;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return 0;
-}
-
 ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
-  const win = new BrowserWindow({ width: 1280, height: 900, title: 'Kindroid call', webPreferences: { contextIsolation: true, nodeIntegration: false } });
+  const win = new BrowserWindow({ width: 1280, height: 900, title: 'Kindroid call', webPreferences: kindroidWebPreferences() });
   await win.loadURL(String(payload.url || 'https://kindroid.ai/'));
   return true;
 });
@@ -359,7 +373,7 @@ ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
   else {
     panel.show();
     panel.focus();
-    if (!panel.webContents.getURL()) await panel.loadURL('https://kindroid.ai/v2/kins/');
+    if (isBlankPage(panel.webContents.getURL())) await panel.loadURL('https://kindroid.ai/v2/kins/');
   }
   sendKindroidPanelState();
   return kindroidPanelState();
@@ -383,14 +397,20 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
     if (isKindroidAuthenticationPage(win.webContents.getURL())) {
       return failure('authentication', 'Kindroid authentication is required before a transcript can be captured.', { groupId, sourceUrl });
     }
-    await waitForBubbles(win);
-    const extracted = await win.webContents.executeJavaScript(extractionScript(), true);
-    if (!extracted || !Array.isArray(extracted.bubbles)) return failure('dom_extraction', 'Transcript extraction returned an invalid payload.', { groupId, sourceUrl });
-    if (!extracted.bubbles.length) return failure('dom_wait', 'No transcript bubbles were found. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
-    const merged = await saveMergedTranscript(token, repoPath, { groupId, groupName, participants, capturedAt, sourceUrl, bubbles: extracted.bubbles });
-    return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: extracted.selectorUsed, scrollAttempts: extracted.scrollAttempts, bubblesFound: extracted.bubblesFound, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
+    // Let the client-rendered chat settle, then use exactly the text selected
+    // by the same Ctrl/Cmd+A operation that works manually. No DOM message
+    // selectors participate in transcript extraction.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const selectedPageText = await selectWholePageText(win);
+    if (isLoginPageText(selectedPageText)) {
+      return failure('authentication', 'Kindroid displayed its login page. Sign in in the Kindroid panel, then retry transcript capture.', { groupId, sourceUrl });
+    }
+    const bubbles = selectionTextToBubbles(selectedPageText);
+    if (!bubbles.length) return failure('selection_extraction', 'Select All did not produce transcript text. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
+    const merged = await saveMergedTranscript(token, repoPath, { groupId, groupName, participants, capturedAt, sourceUrl, bubbles });
+    return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: 'keyboard-select-all', scrollAttempts: 0, bubblesFound: bubbles.length, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
   } catch (error) {
-    const stage = error.stage || (/ERR_|navigation/i.test(error.message) ? 'navigation' : 'dom_extraction');
+    const stage = error.stage || (/ERR_|navigation/i.test(error.message) ? 'navigation' : 'selection_extraction');
     return failure(stage, error.message, { groupId, sourceUrl });
   }
 });
