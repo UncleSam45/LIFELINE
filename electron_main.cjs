@@ -10,6 +10,7 @@ const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
+const KINDROID_HOME_URL = 'https://kindroid.ai/';
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -17,10 +18,6 @@ if (!hasSingleInstanceLock) app.quit();
 
 function kindroidWebPreferences() {
   return { contextIsolation: true, nodeIntegration: false, partition: KINDROID_PARTITION };
-}
-
-function isBlankPage(url) {
-  return !url || url === 'about:blank';
 }
 
 function prepareKindroidSession() {
@@ -75,11 +72,24 @@ function createKindroidPanel() {
   kindroidPanel.on('show', sendKindroidPanelState);
   kindroidPanel.on('hide', sendKindroidPanelState);
   kindroidPanel.on('closed', () => { kindroidPanel = null; sendKindroidPanelState(); });
+  kindroidPanel.webContents.on('did-fail-load', (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    if (validatedURL === KINDROID_HOME_URL || kindroidPanel?.isDestroyed()) return;
+    kindroidPanel.loadURL(KINDROID_HOME_URL).catch(() => {});
+  });
   kindroidPanel.webContents.setWindowOpenHandler(() => ({
     action: 'allow',
     overrideBrowserWindowOptions: { parent: kindroidPanel, autoHideMenuBar: true, webPreferences: kindroidWebPreferences() },
   }));
   return kindroidPanel;
+}
+
+async function loadKindroidPanel(panel) {
+  await prepareKindroidSession();
+  const kindroidSession = panel.webContents.session;
+  await kindroidSession.clearCache();
+  await kindroidSession.clearStorageData({ origin: KINDROID_HOME_URL, storages: ['serviceworkers', 'cachestorage'] });
+  await panel.loadURL(KINDROID_HOME_URL, { extraHeaders: 'Cache-Control: no-cache, no-store\nPragma: no-cache' });
 }
 
 function cleanGroupId(value) {
@@ -466,10 +476,7 @@ ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
   else {
     panel.show();
     panel.focus();
-    if (isBlankPage(panel.webContents.getURL())) {
-      await prepareKindroidSession();
-      await panel.loadURL('https://kindroid.ai/v2/kins/');
-    }
+    await loadKindroidPanel(panel);
   }
   sendKindroidPanelState();
   return kindroidPanelState();
@@ -515,6 +522,13 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
     const stage = error.stage || (/ERR_|navigation/i.test(error.message) ? 'navigation' : 'selection_extraction');
     return failure(stage, error.message, { groupId, sourceUrl });
   }
+});
+
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 if (hasSingleInstanceLock) app.whenReady().then(createMainWindow);
