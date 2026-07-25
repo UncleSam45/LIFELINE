@@ -6,10 +6,12 @@ const transcriptWindows = new Map();
 const transcriptCaptureTimers = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
+let kindroidPanelLoadFailed = false;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
+const KINDROID_HOME_URL = 'https://kindroid.ai/';
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -74,12 +76,30 @@ function createKindroidPanel() {
   });
   kindroidPanel.on('show', sendKindroidPanelState);
   kindroidPanel.on('hide', sendKindroidPanelState);
-  kindroidPanel.on('closed', () => { kindroidPanel = null; sendKindroidPanelState(); });
+  kindroidPanel.on('closed', () => { kindroidPanel = null; kindroidPanelLoadFailed = false; sendKindroidPanelState(); });
+  kindroidPanel.webContents.on('did-finish-load', () => { kindroidPanelLoadFailed = false; });
+  kindroidPanel.webContents.on('did-fail-load', (_event, errorCode, _errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    kindroidPanelLoadFailed = true;
+    if (validatedURL === KINDROID_HOME_URL || kindroidPanel?.isDestroyed()) return;
+    kindroidPanel.loadURL(KINDROID_HOME_URL).catch(() => {});
+  });
   kindroidPanel.webContents.setWindowOpenHandler(() => ({
     action: 'allow',
     overrideBrowserWindowOptions: { parent: kindroidPanel, autoHideMenuBar: true, webPreferences: kindroidWebPreferences() },
   }));
   return kindroidPanel;
+}
+
+async function loadKindroidPanel(panel) {
+  await prepareKindroidSession();
+  try {
+    await panel.loadURL(KINDROID_HOME_URL);
+  } catch (error) {
+    if (panel.isDestroyed()) throw error;
+    await panel.webContents.session.clearCache();
+    await panel.loadURL(KINDROID_HOME_URL);
+  }
 }
 
 function cleanGroupId(value) {
@@ -466,10 +486,7 @@ ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
   else {
     panel.show();
     panel.focus();
-    if (isBlankPage(panel.webContents.getURL())) {
-      await prepareKindroidSession();
-      await panel.loadURL('https://kindroid.ai/v2/kins/');
-    }
+    if (isBlankPage(panel.webContents.getURL()) || kindroidPanelLoadFailed) await loadKindroidPanel(panel);
   }
   sendKindroidPanelState();
   return kindroidPanelState();
