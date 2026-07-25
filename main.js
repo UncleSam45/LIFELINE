@@ -59,8 +59,8 @@ const DIRECTORY_API_METADATA = {
   avatar_preset: 'Experimentally synchronized: update_kin_legacy.ai_avatar',
   avatar_description: 'Experimentally synchronized: update_kin_legacy.custom_avatar_description',
   age: 'Local only',
-  location: 'Local only',
-  position: 'Local only',
+  location: 'Local directory location; GROUPMAKER sends location changes as messages',
+  activity: 'Officially synchronized: update_info.current_scene',
 };
 
 const DIRECTORY_FIELDS = [
@@ -68,8 +68,8 @@ const DIRECTORY_FIELDS = [
   ['gender', 'GENDER', 'line'],
   ['age', 'AGE', 'age_combo'],
   ['ai_id', 'ID', 'line'],
-  ['location', 'ACTIVITY', 'line'],
-  ['position', 'POSITION', 'line'],
+  ['location', 'LOCATION', 'line'],
+  ['activity', 'ACTIVITY', 'line'],
   ['backstory', 'BACKSTORY 1', 'text'],
   ['ai_memory', 'MEMORY', 'text'],
   ['greeting', 'GREETING', 'text'],
@@ -91,6 +91,7 @@ const DEFAULT_ENTRY = {
   avatar_preset: '1',
   additional_context: '',
   location: 'home',
+  activity: '',
   online: false,
   archived: false,
 };
@@ -134,7 +135,7 @@ const state = {
     : 'Enter your Kindroid API key to enable GROUPMAKER.',
   groupmakerNames: '',
   groupmakerLocation: '',
-  groupmakerPosition: '',
+  groupmakerActivity: '',
   groupmakerContext: '',
   activeEntryTab: 'profile',
   settingsOpen: false,
@@ -165,6 +166,43 @@ function groupmakerSessions() {
   return state.config.groupmaker_sessions;
 }
 
+function localCalendarDate(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function groupmakerSessionDate(session) {
+  const explicit = String(session?.session_date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return explicit;
+  const timestamp = String(session?.created_at || session?.touched_at || '').trim();
+  const parsed = timestamp ? new Date(timestamp) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? localCalendarDate(parsed) : '';
+}
+
+function closeExpiredGroupmakerSessions(now = new Date()) {
+  const today = localCalendarDate(now);
+  const closedAt = now.toISOString();
+  let changed = false;
+  groupmakerSessions().forEach((session) => {
+    if (String(session.closed_at || '').trim() || String(session.idle_at || '').trim()) return;
+    const sessionDate = groupmakerSessionDate(session);
+    if (sessionDate && sessionDate !== today) {
+      session.closed_at = closedAt;
+      session.closed_reason = 'daily_rollover';
+      changed = true;
+    }
+  });
+  const activeKey = String(state.config.groupmaker_active_session_key || '').trim();
+  const active = groupmakerSessions().find((session) => String(session.session_key || '').trim() === activeKey);
+  if (activeKey && (!active || String(active.closed_at || '').trim() || String(active.idle_at || '').trim())) {
+    state.config.groupmaker_active_session_key = '';
+    changed = true;
+  }
+  return changed;
+}
+
 
 function groupmakerDraft() {
   if (!state.config.groupmaker_draft || typeof state.config.groupmaker_draft !== 'object' || Array.isArray(state.config.groupmaker_draft)) {
@@ -177,7 +215,7 @@ function hydrateGroupmakerDraft() {
   const draft = groupmakerDraft();
   state.groupmakerNames = String(draft.names || '');
   state.groupmakerLocation = String(draft.location || '');
-  state.groupmakerPosition = String(draft.position || '');
+  state.groupmakerActivity = String(draft.activity || draft.position || '');
   state.groupmakerContext = String(draft.context || '');
 }
 
@@ -198,7 +236,8 @@ function persistGroupmakerDraft() {
   const draft = groupmakerDraft();
   draft.names = state.groupmakerNames;
   draft.location = state.groupmakerLocation;
-  draft.position = state.groupmakerPosition;
+  draft.activity = state.groupmakerActivity;
+  delete draft.position;
   draft.context = state.groupmakerContext;
   draft.touched_at = new Date().toISOString();
 }
@@ -214,13 +253,18 @@ function scheduleGroupmakerDraftSave() {
 }
 
 function activeGroupmakerSession() {
+  closeExpiredGroupmakerSessions();
   const activeKey = String(state.config.groupmaker_active_session_key || '').trim();
-  if (!activeKey) return null;
-  return groupmakerSessions().find((row) => String(row.session_key || '').trim() === activeKey && !String(row.closed_at || '').trim() && !String(row.idle_at || '').trim()) || null;
+  const selected = activeKey ? groupmakerSessions().find((row) => String(row.session_key || '').trim() === activeKey && !String(row.closed_at || '').trim() && !String(row.idle_at || '').trim()) : null;
+  if (selected) return selected;
+  const todaySession = latestOpenGroupmakerSession();
+  if (todaySession) state.config.groupmaker_active_session_key = todaySession.session_key;
+  return todaySession;
 }
 
 function latestOpenGroupmakerSession() {
-  return groupmakerSessions().filter((row) => !String(row.closed_at || '').trim() && !String(row.idle_at || '').trim() && String(row.group_id || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')))[0] || null;
+  const today = localCalendarDate();
+  return groupmakerSessions().filter((row) => groupmakerSessionDate(row) === today && !String(row.closed_at || '').trim() && !String(row.idle_at || '').trim() && String(row.group_id || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')))[0] || null;
 }
 
 function reconnectGroupmakerSession() {
@@ -242,7 +286,7 @@ function detectGroupmakerPeople(text) {
     const nameTokens = normalizeTokens(name);
     const meaningful = [...nameTokens].filter((token) => token.length >= 3);
     const matched = meaningful.some((token) => tokens.has(token)) || [...nameTokens].some((token) => tokens.has(token));
-    if (matched) byId.set(aiId, { ai_id: aiId, name, location: person.location || '', position: person.position || '' });
+    if (matched) byId.set(aiId, { ai_id: aiId, name, location: person.location || '', activity: person.activity || person.position || '' });
   });
   return [...byId.values()];
 }
@@ -259,10 +303,8 @@ function validAiIds(rawIds) {
   }).filter((id) => id && !seen.has(id) && seen.add(id));
 }
 
-function composeGroupName(people, hint = '') {
-  const trimmed = String(hint || '').trim();
-  if (trimmed) return trimmed.slice(0, 50);
-  return [...new Set(people.map((person) => person.name).filter(Boolean))].sort().join(' + ').slice(0, 50) || 'Live Session';
+function composeGroupName() {
+  return localCalendarDate();
 }
 
 
@@ -444,6 +486,8 @@ function ensureEntry(entry) {
   delete entry.rank;
   delete entry.responsibilities;
   delete entry.fetch_rules;
+  if (entry.activity === undefined && entry.position !== undefined) entry.activity = entry.position;
+  delete entry.position;
   Object.entries(DEFAULT_ENTRY).forEach(([key, value]) => {
     if (entry[key] === undefined) entry[key] = Array.isArray(value) ? [...value] : value;
   });
@@ -663,11 +707,13 @@ async function loadBridge() {
     state.config = bestCandidate.config;
     entries().forEach(ensureEntry);
     hydrateGroupmakerDraft();
+    const dailyRollover = closeExpiredGroupmakerSessions();
     state.authenticated = true;
     state.syncState = 'Online';
     state.syncDetail = bestCandidate.path === BRIDGE_PATH
       ? `Restored ${entries().length} directory entries from ${BRIDGE_REPO}/${BRIDGE_PATH}.`
       : `Recovered ${entries().length} entries from bridge backup path ${bestCandidate.path}; next save will migrate them to ${BRIDGE_PATH}.`;
+    if (dailyRollover) await saveBridgeQuiet('Close expired daily GROUPMAKER sessions');
   } else if (lastError && !/not found/i.test(lastError.message)) {
     state.authenticated = false;
     state.syncState = 'Denied'; state.syncDetail = lastError.message;
@@ -742,7 +788,7 @@ function entryInitials(entry) {
 }
 
 function entryMeta(entry) {
-  return [entry.position, entry.location].map((value) => String(value || '').trim()).filter(Boolean).slice(0, 2).join(' • ') || 'No role details yet';
+  return [entry.location, entry.activity].map((value) => String(value || '').trim()).filter(Boolean).slice(0, 2).join(' • ') || 'No location or activity yet';
 }
 
 function dashboardStats() {
@@ -775,12 +821,6 @@ function renderSettingsPanel() {
   return `<section class="settings-panel"><div><p class="eyebrow">SETTINGS</p><h3>Bridge settings</h3><p class="sync-note">Import a config.json file from one dedicated settings area.</p></div><button id="import" class="ghost" type="button">Import config.json</button><input id="file" type="file" accept="application/json,.json" hidden /></section>`;
 }
 
-function profileStatusMarkup(entry) {
-  const generation = ensureGenerationPerson(entry);
-  return `<label class="status-field"><span>STATUS</span><input data-generation-field="status" value="${escapeHtml(generation.status || '')}" placeholder="Alive, Elder, Deceased…" /></label>`;
-}
-
-
 function renderWorldView() {
   const all = entries().map(ensureEntry).filter((entry) => !entry.archived);
   const online = all.filter((entry) => entry.online);
@@ -804,7 +844,7 @@ function renderWorldView() {
 
 function renderDirectoryWorkspace(current, onlineLabel) {
   if (!current) return '<div class="empty">Add a person or import a legacy config to begin.</div>';
-  return `<div class="hero-line"><div><h1>${escapeHtml(current.name || 'No person selected')}</h1><div class="hero-meta"><span>${escapeHtml(onlineLabel)}</span><span>${escapeHtml(current.location || 'No location')}</span></div></div><button id="save" title="Save and sync" ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save'}</button></div><div class="entry-tabs" role="tablist"><button class="tab ${state.activeEntryTab === 'profile' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'profile'}" data-tab="profile">PROFILE</button><button class="tab ${state.activeEntryTab === 'family' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'family'}" data-tab="family">FAMILY</button><button class="tab ${state.activeEntryTab === 'memory' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'memory'}" data-tab="memory">MEMORY</button></div><div class="tab-stage"><section class="profile-panel tab-panel ${state.activeEntryTab === 'profile' ? 'active' : ''}"><div class="status-grid"><button id="toggle-online" class="status ${current.online ? 'on' : ''}"><span>${current.online ? 'ONLINE' : 'OFFLINE'}</span><small>${current.online ? 'Ready for routing' : 'Hidden from live flow'}</small></button>${profileStatusMarkup(current)}<div class="asset-card accent"><b>${escapeHtml(current.location || '—')}</b><span>ACTIVE LOCATION</span></div></div><form id="entry-form" class="field-grid">${DIRECTORY_FIELDS.map(([key, label, kind]) => fieldMarkup(current, key, label, kind)).join('')}</form></section>${renderGenerationsSection(current)}${renderMemorySection(current)}</div>`;
+  return `<div class="hero-line"><div><h1>${escapeHtml(current.name || 'No person selected')}</h1><div class="hero-meta"><span>${escapeHtml(onlineLabel)}</span><span>${escapeHtml(current.location || 'No location')}</span></div></div><button id="save" title="Save and sync" ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save'}</button></div><div class="entry-tabs" role="tablist"><button class="tab ${state.activeEntryTab === 'profile' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'profile'}" data-tab="profile">PROFILE</button><button class="tab ${state.activeEntryTab === 'family' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'family'}" data-tab="family">FAMILY</button><button class="tab ${state.activeEntryTab === 'memory' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'memory'}" data-tab="memory">MEMORY</button></div><div class="tab-stage"><section class="profile-panel tab-panel ${state.activeEntryTab === 'profile' ? 'active' : ''}"><div class="status-grid"><button id="toggle-online" class="status ${current.online ? 'on' : ''}"><span>${current.online ? 'ONLINE' : 'OFFLINE'}</span><small>${current.online ? 'Ready for routing' : 'Hidden from live flow'}</small></button><div class="asset-card accent"><b>${escapeHtml(current.location || '—')}</b><span>LOCATION</span></div><div class="asset-card accent"><b>${escapeHtml(current.activity || '—')}</b><span>ACTIVITY / CURRENT SCENE</span></div></div><form id="entry-form" class="field-grid">${DIRECTORY_FIELDS.map(([key, label, kind]) => fieldMarkup(current, key, label, kind)).join('')}</form></section>${renderGenerationsSection(current)}${renderMemorySection(current)}</div>`;
 }
 
 function renderDirectory() {
@@ -893,7 +933,7 @@ function renderGroupmakerWindow() {
   const active = activeGroupmakerSession();
   const transcriptStatus = state.groupmakerTranscriptStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerTranscriptStatus)}</p>` : '';
   const sessions = groupmakerSessions().filter((row) => !String(row.closed_at || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')));
-  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Position / group name hint</span><input id="gm-position" value="${escapeHtml(state.groupmakerPosition)}" placeholder="Patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="What is happening in this call?">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? 'Update active group' : 'Create group'}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><p class="sync-note">Voice transcripts are captured automatically from the call opened after creating or updating this group.</p><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p>${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml((row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
+  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Activity</span><input id="gm-activity" value="${escapeHtml(state.groupmakerActivity)}" placeholder="Talking together at a patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="Persistent shared context for this group">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? `Update ${localCalendarDate()}` : `Create ${localCalendarDate()}`}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div><p class="sync-note">One group is used per local calendar day and named ${localCalendarDate()}. Yesterday's group closes automatically before today's is created. Activity is synchronized to the group and every participant as Kindroid's current scene. Location changes are messaged to each participant and reflected in DIRECTORY.</p><p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p>${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml(row.group_name || (row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
 
@@ -970,10 +1010,11 @@ function groupmakerPresenceChanged(active, aiList = [], location = '') {
 
 async function runGroupmakerPresenceAutomations({ people = [], groupId = '', active = null, aiList = [] } = {}) {
   const location = groupmakerPhysicalLocation();
-  const report = { directSent: 0, groupSent: false, changedNames: [], errors: [] };
-  if (!location || !people.length) return report;
+  const activity = String(state.groupmakerActivity || '').trim();
+  const report = { directSent: 0, groupSent: false, scenesUpdated: 0, changedNames: [], errors: [] };
+  if (!people.length) return report;
 
-  if (groupId && groupmakerPresenceChanged(active, aiList, location)) {
+  if (location && groupId && groupmakerPresenceChanged(active, aiList, location)) {
     const names = formatGroupmakerNames(people.map((person) => person.name));
     if (names) {
       const message = `*${names} are now physically present together . Their location is ${location}*`;
@@ -986,17 +1027,30 @@ async function runGroupmakerPresenceAutomations({ people = [], groupId = '', act
   for (const person of people) {
     const entry = entries().map(ensureEntry).find((row) => String(row.ai_id || '').trim() === String(person.ai_id || '').trim());
     if (!entry) continue;
-    const oldLocation = String(entry.location || '').trim();
-    if (oldLocation && sameNormalizedText(oldLocation, location)) continue;
-    const message = `*${entry.name || person.name || 'This person'} is currently transiting from ${oldLocation || 'unknown location'} to ${location}*`;
-    const result = await kindroidApiClient.execute('send_message', { ai_id: entry.ai_id, message, stream: false }, { timeoutMs: 12000 });
-    if (!result.ok) {
-      report.errors.push(`Location notice failed for ${entry.name || person.name || entry.ai_id}: ${result.message || result.status || 'Kindroid request failed'}`);
-      continue;
+    if (location) {
+      const oldLocation = String(entry.location || '').trim();
+      if (!oldLocation || !sameNormalizedText(oldLocation, location)) {
+        const message = `*${entry.name || person.name || 'This person'} is currently transiting from ${oldLocation || 'unknown location'} to ${location}*`;
+        const result = await kindroidApiClient.execute('send_message', { ai_id: entry.ai_id, message, stream: false }, { timeoutMs: 12000 });
+        if (result.ok) {
+          entry.location = location;
+          report.changedNames.push(entry.name || person.name || entry.ai_id);
+          report.directSent += 1;
+        } else {
+          report.errors.push(`Location notice failed for ${entry.name || person.name || entry.ai_id}: ${result.message || result.status || 'Kindroid request failed'}`);
+        }
+      }
     }
-    entry.location = location;
-    report.changedNames.push(entry.name || person.name || entry.ai_id);
-    report.directSent += 1;
+
+    if (activity) {
+      const sceneResult = await kindroidApiClient.execute('update_info', { ai_id: entry.ai_id, current_scene: activity, __include_current_scene: 'set' }, { timeoutMs: 12000 });
+      if (sceneResult.ok) {
+        entry.activity = activity;
+        report.scenesUpdated += 1;
+      } else {
+        report.errors.push(`Activity update failed for ${entry.name || person.name || entry.ai_id}: ${sceneResult.message || sceneResult.status || 'Kindroid request failed'}`);
+      }
+    }
   }
 
   return report;
@@ -1009,19 +1063,21 @@ async function syncGroupmaker() {
   if (active && (!state.groupmakerNames.trim() || !state.groupmakerContext.trim())) {
     state.groupmakerNames = Array.isArray(active.names) ? active.names.join(', ') : state.groupmakerNames;
     state.groupmakerContext = String(active.group_context || state.groupmakerContext || '').trim();
-    state.groupmakerPosition = String(active.group_name || state.groupmakerPosition || '').trim();
+    state.groupmakerActivity = String(active.current_scene || state.groupmakerActivity || '').trim();
   }
   const context = state.groupmakerContext.trim();
+  const activity = state.groupmakerActivity.trim();
   const people = detectGroupmakerPeople(state.groupmakerNames);
   const detectedAiIds = validAiIds(people.map((person) => person.ai_id));
   const aiList = detectedAiIds.length ? detectedAiIds : validAiIds(active?.ai_list || []);
   const sessionNames = people.length ? people.map((p) => p.name) : (Array.isArray(active?.names) ? active.names : []);
   if (!state.kindroidApiKey.startsWith('kn_')) { state.groupmakerOpen = true; state.groupmakerStatus = 'Enter a valid Kindroid API key first.'; render(); return; }
+  if (!groupmakerPhysicalLocation()) { state.groupmakerOpen = true; state.groupmakerStatus = 'Location is required so participant location changes can be announced and saved in DIRECTORY.'; render(); return; }
   if (!context) { state.groupmakerOpen = true; state.groupmakerStatus = 'Group context is required.'; render(); return; }
+  if (!activity) { state.groupmakerOpen = true; state.groupmakerStatus = 'Activity is required so the group and every participant receive a current scene.'; render(); return; }
   if (!aiList.length) { state.groupmakerOpen = true; state.groupmakerStatus = 'No valid AI IDs detected from the names field or active session.'; render(); return; }
-  const groupName = composeGroupName(people, state.groupmakerPosition || state.groupmakerLocation);
-  const locationByAiId = Object.fromEntries(people.filter((p) => state.groupmakerPosition || p.position).map((p) => [p.ai_id, state.groupmakerPosition || p.position]));
-  const payload = { ai_list: aiList, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, share_short_term_memory: true, use_manual_turntaking: true, ...(active ? { group_id: active.group_id } : {}) };
+  const groupName = composeGroupName();
+  const payload = { ai_list: aiList, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, current_scene: activity, share_short_term_memory: true, use_manual_turntaking: true, ...(active ? { group_id: active.group_id, __include_group_name: 'set', __include_group_context: 'set', __include_group_directive: 'set', __include_current_scene: 'set' } : {}) };
   const toolKey = active ? 'group_update' : 'create_groupchat_current_discovery';
   const priorActive = active ? { ...active, ai_list: [...validAiIds(active.ai_list || [])] } : null;
   closePriorGroupmakerTabs();
@@ -1034,21 +1090,22 @@ async function syncGroupmaker() {
     result.detail = result.rawText || String(result.data || '');
     result.groupIdSource = [result.rawText, result.headers?.location, result.headers?.Location].filter(Boolean).join('\n');
     const now = new Date().toISOString();
+    const sessionDate = localCalendarDate();
     let target = active;
     if (active) {
       const automation = await runGroupmakerPresenceAutomations({ people, groupId: target.group_id, active: priorActive, aiList });
-      Object.assign(target, { ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, last_automation: { ...automation, ran_at: now } });
+      Object.assign(target, { ai_list: aiList, names: sessionNames, group_name: groupName, session_date: sessionDate, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, current_scene: activity, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, last_automation: { ...automation, ran_at: now } });
       const opened = openPreparedGroupmakerTab(preparedTab, target.group_id);
-      state.groupmakerStatus = `Updated active session (${result.status}). Automation: ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
+      state.groupmakerStatus = `Updated active session (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
     } else {
       const groupId = extractGroupId(result.groupIdSource || result.detail);
       if (!groupId) throw new Error('Create succeeded, but no group_id could be parsed from the response.');
       const automation = await runGroupmakerPresenceAutomations({ people, groupId, active: null, aiList });
-      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, location_by_ai_id: locationByAiId, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
+      target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, session_date: sessionDate, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, current_scene: activity, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, created_at: now, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
       state.config.groupmaker_sessions = groupmakerSessions().filter((row) => row.group_id !== groupId).concat(target);
       state.config.groupmaker_active_session_key = groupId;
       const opened = openPreparedGroupmakerTab(preparedTab, groupId);
-      state.groupmakerStatus = `Created active session ${groupId} (${result.status}). Automation: ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(groupId)}`}`;
+      state.groupmakerStatus = `Created active session ${groupId} (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(groupId)}`}`;
     }
     persistGroupmakerDraft();
     await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`);
@@ -1140,7 +1197,7 @@ function bindDirectoryEvents() {
   document.querySelector('#gm-sync')?.addEventListener('click', syncGroupmaker);
   document.querySelector('#gm-close-session')?.addEventListener('click', () => { const active = activeGroupmakerSession(); if (active) { active.closed_at = new Date().toISOString(); state.config.groupmaker_active_session_key = ''; saveBridge('GROUPMAKER close session'); } });
   document.querySelectorAll('.gm-session').forEach((button) => button.addEventListener('click', () => { state.config.groupmaker_active_session_key = button.dataset.session; saveBridge('GROUPMAKER activate session'); }));
-  ['names', 'location', 'position', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names') refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); }); });
+  ['names', 'location', 'activity', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names') refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); }); });
   const current = selectedEntry();
   if (!current) return;
   document.querySelector('#toggle-online')?.addEventListener('click', () => { current.online = !current.online; saveBridge('Update online status'); });
