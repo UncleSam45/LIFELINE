@@ -1,9 +1,10 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 
 const APP_ROOT = __dirname;
 const transcriptWindows = new Map();
+const transcriptCaptureTimers = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
 const BRIDGE_OWNER = 'unclesam45';
@@ -22,16 +23,10 @@ function isBlankPage(url) {
 
 function prepareKindroidSession() {
   if (!kindroidSessionReady) {
-    const kindroidSession = session.fromPartition(KINDROID_PARTITION);
-    // Preserve cookies/local storage (and therefore the login), but discard
-    // cached application bundles and service workers. A stale Kindroid SPA
-    // worker otherwise leaves every window in this shared partition white.
-    kindroidSessionReady = Promise.all([
-      kindroidSession.clearCache(),
-      kindroidSession.clearStorageData({ storages: ['serviceworkers', 'cachestorage'] }),
-    ]).catch((error) => {
-      console.warn(`Could not refresh the Kindroid browser cache: ${error.message}`);
-    });
+    // The persistent partition owns Kindroid's cookies, local storage, cache,
+    // and service worker. Do not clear any of them during startup: doing so can
+    // invalidate the SPA boot sequence and authentication stored by Kindroid.
+    kindroidSessionReady = Promise.resolve();
   }
   return kindroidSessionReady;
 }
@@ -89,8 +84,8 @@ function cleanGroupId(value) {
   return String(value || '').trim();
 }
 
-function groupChatUrl(groupId) {
-  return `https://kindroid.ai/v2/chat/group/${encodeURIComponent(groupId)}/`;
+function groupCallUrl(groupId) {
+  return `https://kindroid.ai/v2/call/group/${encodeURIComponent(groupId)}/`;
 }
 
 function failure(stage, message, extra = {}) {
@@ -254,60 +249,104 @@ async function saveMergedTranscript(token, repoPath, mergeInput) {
   }
 }
 
-async function selectWholePageText(win) {
+async function extractCallTranscript(win) {
   win.show();
   win.focus();
   win.webContents.focus();
-  await win.webContents.executeJavaScript('document.activeElement?.blur(); document.body?.focus()', true);
-  const modifier = process.platform === 'darwin' ? 'meta' : 'control';
-  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'A', modifiers: [modifier] });
-  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'A', modifiers: [modifier] });
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  try {
-    const selectedText = await win.webContents.executeJavaScript('window.getSelection()?.toString() || ""', true);
-    return String(selectedText || '');
-  } finally {
-    await win.webContents.executeJavaScript('window.getSelection()?.removeAllRanges()', true).catch(() => {});
-  }
-}
+  return win.webContents.executeJavaScript(`(${async function extractKindroidCallTranscript() {
+    const THREE_DOT_PATH = 'M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3m5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3m5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3';
+    const TRANSCRIPT_ICON_PATH = 'M3 20l1.3 -3.9c-2.324 -3.437 -1.426 -7.872 2.1 -10.374c3.526 -2.501 8.59 -2.296 11.845 .48c3.255 2.777 3.695 7.266 1.029 10.501c-2.666 3.235 -7.615 4.215 -11.574 2.293l-4.7 1';
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const textOf = (element) => (element?.innerText || element?.textContent || '').replace(/\s+/g, ' ').trim();
+    const visible = (element) => {
+      if (!element) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+    };
+    const unique = (elements) => [...new Set(elements.filter(Boolean))];
+    const click = (element) => {
+      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+      element.click();
+    };
+    const isThreeDots = (button) => {
+      if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+      const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
+      if (button.getAttribute('aria-haspopup') === 'listbox' && (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5'))) return true;
+      const svg = button.querySelector("svg[viewBox='0 0 24 24']");
+      const dots = [...(svg?.querySelectorAll('circle') || [])]
+        .map((circle) => `${circle.getAttribute('cx')},${circle.getAttribute('cy')},${circle.getAttribute('r')}`).sort();
+      return dots.join('|') === '12,12,1|19,12,1|5,12,1';
+    };
+    const isTranscriptOption = (option) => {
+      const role = option?.getAttribute?.('role');
+      const tag = option?.tagName?.toLowerCase();
+      if (!option || (role && !['option', 'menuitem'].includes(role))) return false;
+      if (!role && tag !== 'button' && !String(option.className || '').includes('call-dock-v2_menu-row')) return false;
+      const label = option.querySelector?.('p.chakra-text') || option;
+      if (!/^Transcript$/i.test(textOf(label))) return false;
+      const iconPath = option.querySelector?.('svg path')?.getAttribute('d');
+      return !iconPath || iconPath.trim() === TRANSCRIPT_ICON_PATH;
+    };
+    const findTranscriptOption = () => {
+      const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
+      const exact = candidates.find((option) => visible(option) && isTranscriptOption(option));
+      if (exact) return exact;
+      // Kindroid has changed the Transcript icon without changing the menu
+      // label. Retain the narrow exact-label fallback from the legacy bridge.
+      const label = [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, button p, [role='option'], [role='menuitem'], button")]
+        .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)));
+      return label?.closest?.("[role='option'], [role='menuitem'], button") || null;
+    };
 
-function selectionTextToBubbles(text) {
-  const lines = String(text || '').split(/\r?\n/).map(normalizeText);
-  const rows = [];
-  let speaker = '';
-  let messageParts = [];
-  let sawMessageHeader = false;
-  const flush = () => {
-    const message = normalizeText(messageParts.join(' '));
-    messageParts = [];
-    if (!message || rows.at(-1)?.text === message) return;
-    rows.push({ text: message, domIndex: rows.length, messageId: '', timestamp: '', speaker });
-  };
-  for (const line of lines) {
-    const header = line.match(/^message from\s+(.+)$/i);
-    if (header) {
-      flush();
-      speaker = normalizeText(header[1]);
-      sawMessageHeader = true;
-      continue;
+    let opened = Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
+    if (!opened) {
+      const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
+      for (const menuButton of menuButtons) {
+        click(menuButton);
+        let option = null;
+        for (let attempt = 0; attempt < 16 && !option; attempt += 1) {
+          await sleep(attempt ? 150 : 350);
+          option = findTranscriptOption();
+        }
+        if (!option) continue;
+        click(option);
+        await sleep(900);
+        opened = true;
+        break;
+      }
     }
-    if (!line || isTranscriptPageNoise(line)) continue;
-    // Once headers are present, text before the first header is page chrome,
-    // not a transcript message. Each header starts one complete message and
-    // all of its wrapped/paragraph lines remain together until the next one.
-    if (sawMessageHeader || speaker) messageParts.push(line);
-  }
-  flush();
 
-  if (!sawMessageHeader) {
-    const selectedText = normalizeText(lines.filter((line) => line && !isTranscriptPageNoise(line)).join(' '));
-    if (selectedText) rows.push({ text: selectedText, domIndex: 0, messageId: '', timestamp: '', speaker: '' });
-  }
-  rows.forEach((row, index) => {
-    row.previousText = rows[index - 1]?.text || '';
-    row.nextText = rows[index + 1]?.text || '';
-  });
-  return rows;
+    const rowSelectors = [
+      '[class*="call-transcript-panel-v2_row__"]',
+      '[class*="call-transcript-panel_row__"]',
+      '[class*="transcript"][class*="row"]',
+    ];
+    let rows = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      rows = unique(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)])).filter(visible);
+      if (rows.length) break;
+      await sleep(150);
+    }
+    const bubbles = rows.map((row, domIndex) => {
+      const textElement = row.querySelector('[class*="call-transcript-panel-v2_text__"], [class*="call-transcript-panel_text__"], [class*="transcript"][class*="text"]');
+      const speakerElement = row.querySelector('[class*="speaker"], [class*="name"], [data-speaker]');
+      const timestampElement = row.querySelector('time, [class*="timestamp"], [class*="time"]');
+      return {
+        text: textOf(textElement || row),
+        domIndex,
+        messageId: row.getAttribute('data-message-id') || row.id || '',
+        timestamp: timestampElement?.getAttribute('datetime') || textOf(timestampElement),
+        speaker: row.getAttribute('data-speaker') || textOf(speakerElement),
+      };
+    }).filter((bubble) => bubble.text);
+    bubbles.forEach((bubble, index) => {
+      bubble.previousText = bubbles[index - 1]?.text || '';
+      bubble.nextText = bubbles[index + 1]?.text || '';
+    });
+    return { opened, bubbles, pageText: textOf(document.body) };
+  }})()`, true);
 }
 
 function getTranscriptWindow(groupId) {
@@ -319,10 +358,59 @@ function getTranscriptWindow(groupId) {
   return win;
 }
 
+function rememberTranscriptWindow(groupId, win) {
+  if (!groupId || !win || win.isDestroyed()) return;
+  transcriptWindows.set(groupId, win);
+  win.once('closed', () => {
+    if (transcriptWindows.get(groupId) === win) transcriptWindows.delete(groupId);
+    const timer = transcriptCaptureTimers.get(groupId);
+    if (timer) clearTimeout(timer);
+    transcriptCaptureTimers.delete(groupId);
+  });
+}
+
+async function captureTranscriptWindow(win, payload = {}) {
+  const groupId = cleanGroupId(payload.groupId);
+  const token = String(payload.accessKey || '').trim();
+  const sourceUrl = groupCallUrl(groupId);
+  const groupName = normalizeText(payload.groupName || payload.session?.group_name);
+  const names = payload.participants || payload.session?.names;
+  const participants = Array.isArray(names) ? names.map(normalizeText).filter(Boolean) : [];
+  if (!groupId || !token || win.isDestroyed() || !isExpectedGroupPage(win.webContents.getURL(), groupId)) return null;
+  const extraction = await extractCallTranscript(win);
+  if (!extraction.opened || !extraction.bubbles.length || isLoginPageText(extraction.pageText)) return null;
+  const capturedAt = new Date().toISOString();
+  const repoPath = `transcripts/${groupId}/transcript.json`;
+  const merged = await saveMergedTranscript(token, repoPath, {
+    groupId, groupName, participants, capturedAt, sourceUrl, bubbles: extraction.bubbles,
+  });
+  return { capturedAt, repoPath, bubbles: extraction.bubbles, merged, groupId, groupName, participants, sourceUrl };
+}
+
+function startAutomaticTranscriptCapture(win, payload = {}) {
+  const groupId = cleanGroupId(payload.groupId);
+  if (!groupId || !String(payload.accessKey || '').trim()) return;
+  const priorTimer = transcriptCaptureTimers.get(groupId);
+  if (priorTimer) clearTimeout(priorTimer);
+  const tick = async () => {
+    if (win.isDestroyed() || transcriptWindows.get(groupId) !== win) return;
+    let captured = false;
+    try {
+      captured = Boolean(await captureTranscriptWindow(win, payload));
+    } catch (error) {
+      console.warn(`Automatic transcript capture for ${groupId} failed: ${error.message}`);
+    }
+    const timer = setTimeout(tick, captured ? 60000 : 3000);
+    transcriptCaptureTimers.set(groupId, timer);
+  };
+  const timer = setTimeout(tick, 3000);
+  transcriptCaptureTimers.set(groupId, timer);
+}
+
 function isExpectedGroupPage(url, groupId) {
   try {
     const parsed = new URL(url);
-    return parsed.hostname === 'kindroid.ai' && parsed.pathname.replace(/\/$/, '') === `/v2/chat/group/${groupId}`;
+    return parsed.hostname === 'kindroid.ai' && parsed.pathname.replace(/\/$/, '') === `/v2/call/group/${groupId}`;
   } catch (_error) {
     return false;
   }
@@ -381,8 +469,11 @@ async function navigateTranscriptWindow(win, sourceUrl, groupId) {
 
 ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
   const win = new BrowserWindow({ width: 1280, height: 900, title: 'Kindroid call', webPreferences: kindroidWebPreferences() });
+  const groupId = cleanGroupId(payload.groupId);
+  rememberTranscriptWindow(groupId, win);
   await prepareKindroidSession();
   await win.loadURL(String(payload.url || 'https://kindroid.ai/'));
+  startAutomaticTranscriptCapture(win, payload);
   return true;
 });
 
@@ -405,7 +496,7 @@ ipcMain.handle('lifeline:get-kindroid-panel-state', () => kindroidPanelState());
 
 ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) => {
   const groupId = cleanGroupId(payload.groupId);
-  const sourceUrl = groupId ? groupChatUrl(groupId) : '';
+  const sourceUrl = groupId ? groupCallUrl(groupId) : '';
   if (!/^[A-Za-z0-9_-]{6,}$/.test(groupId)) return failure('validation', 'A valid Kindroid groupId is required.', { groupId, sourceUrl });
   const token = String(payload.accessKey || '').trim();
   if (!token) return failure('validation', 'GitHub access key is required to save the transcript.', { groupId, sourceUrl });
@@ -415,22 +506,28 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
   const repoPath = `transcripts/${groupId}/transcript.json`;
   try {
     const win = getTranscriptWindow(groupId);
-    await navigateTranscriptWindow(win, sourceUrl, groupId);
+    // Reuse the already-running GROUPMAKER call. Reloading it here tears down
+    // the live call and can leave Kindroid's SPA on a blank page. Only navigate
+    // when capture was requested before a call window existed.
+    if (!isExpectedGroupPage(win.webContents.getURL(), groupId)) {
+      await navigateTranscriptWindow(win, sourceUrl, groupId);
+    }
     if (isKindroidAuthenticationPage(win.webContents.getURL())) {
       return failure('authentication', 'Kindroid authentication is required before a transcript can be captured.', { groupId, sourceUrl });
     }
-    // Let the client-rendered chat settle, then use exactly the text selected
-    // by the same Ctrl/Cmd+A operation that works manually. No DOM message
-    // selectors participate in transcript extraction.
+    // Let the call controls settle, open Kindroid's Transcript panel through
+    // its exact three-dot menu, and extract only transcript entries from the
+    // transcript row containers. Page chrome never participates in capture.
     await new Promise((resolve) => setTimeout(resolve, 2000));
-    const selectedPageText = await selectWholePageText(win);
-    if (isLoginPageText(selectedPageText)) {
+    const extraction = await extractCallTranscript(win);
+    if (isLoginPageText(extraction.pageText)) {
       return failure('authentication', 'Kindroid displayed its login page. Sign in in the Kindroid panel, then retry transcript capture.', { groupId, sourceUrl });
     }
-    const bubbles = selectionTextToBubbles(selectedPageText);
-    if (!bubbles.length) return failure('selection_extraction', 'Select All did not produce transcript text. Confirm Kindroid is signed in and the group-chat page contains messages.', { groupId, sourceUrl });
+    if (!extraction.opened) return failure('transcript_panel', 'Could not open the Transcript option from the Kindroid call menu.', { groupId, sourceUrl });
+    const bubbles = extraction.bubbles;
+    if (!bubbles.length) return failure('dom_extraction', 'The Transcript panel opened, but no transcript entries were found inside its transcript boxes.', { groupId, sourceUrl });
     const merged = await saveMergedTranscript(token, repoPath, { groupId, groupName, participants, capturedAt, sourceUrl, bubbles });
-    return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: 'keyboard-select-all', scrollAttempts: 0, bubblesFound: bubbles.length, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
+    return { ok: true, groupId, groupName, participants, sourceUrl, repoPath, selectorUsed: 'kindroid-call-transcript-rows', scrollAttempts: 0, bubblesFound: bubbles.length, newEntries: merged.newEntryIds.length, totalEntries: merged.doc.entries.length, capturedAt };
   } catch (error) {
     const stage = error.stage || (/ERR_|navigation/i.test(error.message) ? 'navigation' : 'selection_extraction');
     return failure(stage, error.message, { groupId, sourceUrl });
