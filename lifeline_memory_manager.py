@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Standalone LIFELINE Memory Manager.
 
-A PySide6 desktop inbox processor for transcript ``.txt`` files.  The app watches a
-folder, buffers incoming transcript text, asks Ollama for structured memories,
-stores raw chunks/events/keyword summaries in SQLite, and removes processed text
-from transcript files only after a successful database transaction.
+The app polls transcript JSON documents in LIFELINE_BRIDGE through GitHub's REST
+API, buffers newly appended entries, asks Ollama for structured memories, and
+stores raw chunks/events/keyword summaries in SQLite.
 """
 from __future__ import annotations
 
@@ -24,12 +23,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse, quote
 
 
 class DependencyInstaller:
-    REQUIRED = {"PySide6": "PySide6", "requests": "requests", "watchdog": "watchdog"}
+    REQUIRED = {"PySide6": "PySide6", "requests": "requests"}
     OPTIONAL = {"jsonschema": "jsonschema"}
 
     @classmethod
@@ -48,13 +47,11 @@ import requests  # noqa: E402
 from PySide6.QtCore import QObject, QSharedMemory, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
 from PySide6.QtGui import QAction, QFont, QIcon  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
-    QApplication, QDialog, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
     QMenu, QSplitter, QSpinBox, QDoubleSpinBox, QStatusBar, QStyle, QSystemTrayIcon,
     QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 )
-from watchdog.events import FileSystemEventHandler  # noqa: E402
-from watchdog.observers import Observer  # noqa: E402
 
 def _default_documents_dir() -> Path:
     """Return the KINDROIDXL storage root, preferring the dedicated D: drive."""
@@ -83,7 +80,6 @@ LEGACY_DB_PATH = Path(__file__).with_name("lifeline_memory.db")
 RUNTIME_DB_PATH = DB_PATH
 RUNTIME_BACKUP_ROOT = DEFAULT_BACKUP_ROOT
 RESTORE_SOURCE_USED = "none"
-DEFAULT_TRANSCRIPT_FOLDER = APP_ROOT / "KINDROIDXL" / "transcripts"
 VALID_TYPES = {"fact", "event", "plan", "preference", "relationship", "status", "lore", "project"}
 KINDROID_REQUESTER = "LIFELINE-MEMORY-MANAGER-CONTEXT-REMINDER"
 BRIDGE_OWNER = os.environ.get("LIFELINE_BRIDGE_OWNER", "unclesam45")
@@ -107,8 +103,8 @@ def _bridge_token() -> str:
 class GitHubBridge:
     """Small GitHub Contents API client shared by transcript restore and DB backups."""
 
-    def __init__(self) -> None:
-        self.token = _bridge_token()
+    def __init__(self, token: str = "") -> None:
+        self.token = token.strip() or _bridge_token()
         self.base = f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}/contents"
 
     @property
@@ -153,25 +149,32 @@ class GitHubBridge:
         payload = response.json()
         return payload if isinstance(payload, list) else []
 
-    def download_transcripts(self, target_folder: Path) -> int:
-        count = 0
+    def validate_access(self) -> None:
+        """Verify that the token can read the configured private bridge repo."""
+        response = requests.get(
+            f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}",
+            headers=self._headers(), timeout=30,
+        )
+        response.raise_for_status()
+
+    def transcript_documents(self) -> List[Tuple[str, List[str]]]:
+        """Return bridge transcript paths and their normalized transcript entries."""
+        documents: List[Tuple[str, List[str]]] = []
         for group in self.list_tree(BRIDGE_TRANSCRIPT_ROOT):
             if group.get("type") != "dir":
                 continue
             group_name = str(group.get("name") or "unknown")
             for item in self.list_tree(f"{BRIDGE_TRANSCRIPT_ROOT}/{group_name}"):
-                if item.get("type") != "file" or not str(item.get("name") or "").endswith(".txt"):
+                if item.get("type") != "file" or str(item.get("name") or "") != "transcript.json":
                     continue
                 data, _sha = self.read_bytes(str(item.get("path")))
                 if not data:
                     continue
-                target = target_folder / f"{group_name}_{item.get('name')}"
-                old = target.read_bytes() if target.exists() else b""
-                if old == data:
-                    continue
-                target.write_bytes(data)
-                count += 1
-        return count
+                payload = json.loads(data.decode("utf-8"))
+                raw_entries = payload.get("transcript", []) if isinstance(payload, dict) else []
+                entries = [str(entry).strip() for entry in raw_entries if str(entry).strip()]
+                documents.append((str(item.get("path")), entries))
+        return documents
 
 GENERIC_KEYWORDS = {
     "week", "today", "tomorrow", "yesterday", "thing", "things", "discussion", "talk", "chat",
@@ -397,14 +400,9 @@ def _record_latest_group_context_reminders(session: Dict[str, Any], reminders: L
     except Exception:
         return
 
-def default_transcript_folder() -> str:
-    DEFAULT_TRANSCRIPT_FOLDER.mkdir(parents=True, exist_ok=True)
-    return str(DEFAULT_TRANSCRIPT_FOLDER)
-
-
 class AppSettings:
     DEFAULTS = {
-        "transcript_folder": default_transcript_folder, "ollama_url": "http://localhost:11434", "ollama_model": "qwen3.5:9b",
+        "ollama_url": "http://localhost:11434", "ollama_model": "qwen3.5:9b",
         "chunk_size": "4000", "minimum_idle_chunk_size": "1500", "maximum_chunk_size": "8000",
         "idle_timeout": "90", "confidence_threshold": "0.75", "context_reminders_enabled": "1", "window_geometry": "",
     }
@@ -1121,7 +1119,7 @@ Return:
 
 @dataclass
 class FileChunk:
-    path: Path
+    source: str
     text: str
 
 
@@ -1130,107 +1128,87 @@ class TranscriptBuffer:
         self.target = target; self.minimum_idle = minimum_idle; self.maximum = maximum
         self.items: List[FileChunk] = []; self.size = 0; self.last_update = time.time()
 
-    def add(self, path: Path, text: str) -> None:
+    def add(self, source: str, text: str) -> None:
         if text:
-            self.items.append(FileChunk(path, text)); self.size += len(text); self.last_update = time.time()
+            self.items.append(FileChunk(source, text)); self.size += len(text); self.last_update = time.time()
 
     def should_flush(self, idle_timeout: int) -> bool:
         return self.size >= self.target or (self.size >= self.minimum_idle and time.time() - self.last_update >= idle_timeout)
 
-    def pop_chunk(self) -> Tuple[str, Dict[Path, int]]:
-        remaining = self.maximum; parts = []; consumed: Dict[Path, int] = {}
+    def pop_chunk(self) -> Tuple[str, Dict[str, int]]:
+        remaining = self.maximum; parts = []; consumed: Dict[str, int] = {}
         while self.items and remaining > 0:
             item = self.items[0]; take = min(len(item.text), remaining)
-            parts.append(item.text[:take]); consumed[item.path] = consumed.get(item.path, 0) + take
+            parts.append(item.text[:take]); consumed[item.source] = consumed.get(item.source, 0) + take
             item.text = item.text[take:]; self.size -= take; remaining -= take
             if not item.text: self.items.pop(0)
         return "\n".join(parts), consumed
 
 
-class FolderEvent(FileSystemEventHandler):
-    def __init__(self, callback: Callable[[Path], None]) -> None: self.callback = callback
-    def on_created(self, event):
-        if not event.is_directory and str(event.src_path).lower().endswith('.txt'): self.callback(Path(event.src_path))
-    def on_modified(self, event):
-        if not event.is_directory and str(event.src_path).lower().endswith('.txt'): self.callback(Path(event.src_path))
-
-
 class ProcessingWorker(QObject):
     log = Signal(str); status = Signal(str); monitor = Signal(dict); output = Signal(str, str); refreshed = Signal(); error = Signal(str)
 
-    def __init__(self, db: MemoryDB, settings: AppSettings) -> None:
-        super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event(); self.observer = None
-        self.queue: "queue.Queue[Path]" = queue.Queue(); self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.seen_sizes: Dict[Path, int] = {}; self.read_retry_log_at: Dict[Path, float] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
+    def __init__(self, db: MemoryDB, settings: AppSettings, github_token: str) -> None:
+        super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
+        self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
-        self.bridge = GitHubBridge(); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
+        self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
-    @Slot(str)
-    def start(self, folder: str) -> None:
-        self.stop_flag.clear(); f = Path(folder); f.mkdir(parents=True, exist_ok=True)
-        self.observer = Observer(); self.observer.schedule(FolderEvent(lambda p: self.queue.put(p)), str(f), recursive=False); self.observer.start()
-        for p in f.glob('*.txt'): self.queue.put(p)
-        self.log.emit(f"Watching {f}"); self.status.emit("Watching")
+    @Slot()
+    def start(self) -> None:
+        self.stop_flag.clear()
+        self.log.emit(f"Monitoring GitHub: {BRIDGE_OWNER}/{BRIDGE_REPO}/{BRIDGE_TRANSCRIPT_ROOT}"); self.status.emit("Monitoring GitHub")
         self.loop()
 
     @Slot()
     def stop(self) -> None:
         self.stop_flag.set()
-        if self.observer: self.observer.stop(); self.observer.join(3)
         self.status.emit("Idle")
 
     def loop(self) -> None:
         idle = self.settings.int('idle_timeout')
         while not self.stop_flag.is_set():
-            try:
-                p = self.queue.get(timeout=0.5); self.read_new(p)
-            except queue.Empty: pass
+            self.stop_flag.wait(0.5)
             if self.buffer.should_flush(idle): self.process_one()
             if not self.cleanup_queue.empty(): self.clean_one()
             now_ts = time.time()
-            if self.bridge.enabled and now_ts >= self.next_bridge_sync:
+            if now_ts >= self.next_bridge_sync:
                 try:
-                    changed = self.bridge.download_transcripts(Path(self.settings.get('transcript_folder')))
-                    if changed: self.log.emit(f"Pulled {changed} transcript file(s) from GitHub bridge.")
-                except Exception as exc: self.log.emit(f"GitHub transcript sync skipped: {exc}")
+                    self.poll_github_transcripts()
+                except Exception as exc: self.error.emit(f"GitHub transcript poll failed: {exc}")
                 self.next_bridge_sync = now_ts + 60
             if now_ts >= self.next_bridge_backup:
                 try: self.db.mirror_to_external_backup(create_snapshot=True)
                 except Exception as exc: self.log.emit(f"Memory database bridge backup skipped: {exc}")
                 self.next_bridge_backup = now_ts + 180
-            self.monitor.emit({"buffered": self.buffer.size, "pending": self.queue.qsize(), "files": len(self.seen_sizes)})
+            self.monitor.emit({"buffered": self.buffer.size, "pending": len(self.buffer.items), "files": len(self.remote_entry_counts)})
         self.stop()
 
-    def read_new(self, path: Path) -> None:
-        try:
-            text = path.read_text(encoding='utf-8', errors='replace')
-            old = self.seen_sizes.get(path, 0)
-            new = text[old:] if len(text) >= old else text
-            self.seen_sizes[path] = len(text)
-            self.buffer.add(path, new)
-            if new: self.log.emit(f"Detected {len(new)} new chars in {path.name}")
-        except PermissionError:
-            now = time.time()
-            if now >= self.read_retry_log_at.get(path, 0):
-                self.log.emit(f"File is locked; retrying {path.name}")
-                self.read_retry_log_at[path] = now + 5
-            threading.Timer(0.75, lambda: None if self.stop_flag.is_set() else self.queue.put(path)).start()
-        except Exception as e: self.error.emit(str(e))
+    def poll_github_transcripts(self) -> None:
+        for source, entries in self.bridge.transcript_documents():
+            old_count = self.remote_entry_counts.get(source, 0)
+            if len(entries) < old_count:
+                old_count = 0
+            new_entries = entries[old_count:]
+            self.remote_entry_counts[source] = len(entries)
+            if new_entries:
+                text = "\n".join(new_entries)
+                self.buffer.add(source, text)
+                self.log.emit(f"Fetched {len(new_entries)} new transcript entries ({len(text)} chars) from {source}")
 
     def process_one(self) -> None:
         chunk, consumed = self.buffer.pop_chunk()
         if not chunk.strip(): return
-        source = ", ".join(p.name for p in consumed)
+        source = ", ".join(consumed)
         if self.db.chunk_already_processed(chunk) or self.db.chunk_already_seen_in_recent_source(source, chunk):
-            for path, n in consumed.items(): self.remove_prefix(path, n)
-            self.log.emit(f"Skipped already-processed transcript chunk from {source}; removed duplicate text without calling Ollama.")
+            self.log.emit(f"Skipped already-processed transcript chunk from {source} without calling Ollama.")
             return
         session = _load_groupmaker_session_for_sources(source)
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
         if not group_people:
             self.db.store_processed_chunk(source, chunk, [])
-            for path, n in consumed.items(): self.remove_prefix(path, n)
             self.log.emit(f"Skipped memory extraction for {source}: no active GROUPMAKER participants to attach memories to.")
-            self.refreshed.emit(); self.status.emit('Watching')
+            self.refreshed.emit(); self.status.emit('Monitoring GitHub')
             return
         client = OllamaClient(self.settings.get('ollama_url'), self.settings.get('ollama_model'))
         extractor = MemoryExtractor(self.settings.float('confidence_threshold'))
@@ -1242,13 +1220,11 @@ class ProcessingWorker(QObject):
             for rej in extractor.rejected: self.log.emit(rej)
             jobs = self.db.store_processed_chunk(source, chunk, memories)
             for job in jobs: self.cleanup_queue.put(job)
-            for path, n in consumed.items(): self.remove_prefix(path, n)
             self.log.emit(f"Stored chunk from {source}; memories={len(memories)}; cleanup_jobs={len(jobs)}")
-            self.refreshed.emit(); self.status.emit('Watching')
+            self.refreshed.emit(); self.status.emit('Monitoring GitHub')
         except Exception as e:
-            self.error.emit(f"Processing failed; transcript text retained for retry: {e}"); self.status.emit('Error')
-            for path, n in consumed.items():
-                self.seen_sizes[path] = max(0, self.seen_sizes.get(path, 0) - n)
+            self.buffer.add(source, chunk)
+            self.error.emit(f"Processing failed; GitHub transcript retained in memory for retry: {e}"); self.status.emit('Error')
 
     def send_context_reminders(self, source: str, chunk: str, session: Dict[str, Any] | None = None) -> None:
         if self.settings.get('context_reminders_enabled').strip().lower() in {"0", "false", "no", "off"}:
@@ -1319,20 +1295,6 @@ class ProcessingWorker(QObject):
             f"Context reminder pass complete for GROUPMAKER group {group_id}: "
             f"group_sent={sent}; group_failed={failed}; direct_sent={direct_sent}; direct_failed={direct_failed}."
         )
-
-    def remove_prefix(self, path: Path, n: int) -> None:
-        last_error: Optional[PermissionError] = None
-        for _attempt in range(8):
-            try:
-                text = path.read_text(encoding='utf-8', errors='replace')
-                path.write_text(text[n:].lstrip('\n'), encoding='utf-8')
-                self.seen_sizes[path] = max(0, len(path.read_text(encoding='utf-8', errors='replace')))
-                return
-            except PermissionError as e:
-                last_error = e
-                time.sleep(0.5)
-        if last_error is not None:
-            raise last_error
 
     def clean_one(self) -> None:
         node_id, _pid, person, kw, new_event = self.cleanup_queue.get_nowait()
@@ -1535,7 +1497,7 @@ class MemoryExplorerDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    start_signal = Signal(str); stop_signal = Signal()
+    start_signal = Signal(); stop_signal = Signal()
     def __init__(self) -> None:
         super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
         self.setWindowTitle('LIFELINE CORE — Memory Intelligence Network'); self.resize(1480, 900); self.build_ui(); self.setup_tray(); self.load_settings(); self.restore_geometry(); self.refresh_tree(); self.refresh_stats(); QTimer.singleShot(250, self.check_ollama)
@@ -1552,18 +1514,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); layout.addWidget(config)
-        self.folder = QLineEdit(); browse = QPushButton('Acquire Folder'); browse.clicked.connect(self.browse)
+        self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
+        self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
-        start = QPushButton('Activate Watch'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch)
-        widgets = [('Transcript Intake', self.folder), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
+        start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch)
+        widgets = [('GitHub Fine-grained Token', self.github_token), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
         for i,(lab,w) in enumerate(widgets): top.addWidget(QLabel(lab),0,i*2); top.addWidget(w,0,i*2+1)
-        top.addWidget(browse,0,6); top.addWidget(check,1,0); top.addWidget(selftest,1,5); top.addWidget(start,1,1); top.addWidget(stop,1,2)
+        top.addWidget(check,1,0); top.addWidget(selftest,1,5); top.addWidget(start,1,1); top.addWidget(stop,1,2)
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
         split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); layout.addWidget(split, 1)
         left = self.core_panel('CORE STATUS', 'Realtime scan state and ingestion pulse.')
-        ll = left.layout(); self.monitor = QLabel('Watched folder:\nFiles detected: 0\nBuffered characters: 0\nPending chunks: 0\nLast processed file:\nLast processed time:'); self.monitor.setObjectName('TelemetryBlock')
+        ll = left.layout(); self.monitor = QLabel('GitHub transcript source:\nRemote documents: 0\nBuffered characters: 0\nPending chunks: 0\nLast poll: not started'); self.monitor.setObjectName('TelemetryBlock')
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setObjectName('ActivityFeed')
         ll.addWidget(self.monitor); ll.addWidget(QLabel('REALTIME INTELLIGENCE FEED')); ll.addWidget(self.log,1); split.addWidget(left)
 
@@ -1668,13 +1631,11 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
-        transcript_folder = self.settings.get('transcript_folder')
-        Path(transcript_folder).mkdir(parents=True, exist_ok=True)
-        self.folder.setText(transcript_folder); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        self.github_token.setText(_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
         self.chunk.setValue(self.settings.int('chunk_size')); self.min_idle.setValue(self.settings.int('minimum_idle_chunk_size')); self.max_chunk.setValue(self.settings.int('maximum_chunk_size')); self.idle.setValue(self.settings.int('idle_timeout')); self.conf.setValue(self.settings.float('confidence_threshold'))
 
     def save_settings(self) -> None:
-        for k,w in [('transcript_folder',self.folder),('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
+        for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
 
@@ -1686,22 +1647,25 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def browse(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, 'Select transcript folder', self.folder.text() or str(Path.home()))
-        if d: self.folder.setText(d); self.save_settings()
-
     def check_ollama(self) -> None:
         self.save_settings(); ok,msg = OllamaClient(self.url.text(), self.model.text()).check(); self.append_log(msg); self.status_label.setText(msg if not ok else 'Idle')
 
     def start_watch(self) -> None:
-        folder = self.folder.text().strip() or default_transcript_folder()
-        Path(folder).mkdir(parents=True, exist_ok=True)
-        self.folder.setText(folder)
+        token = self.github_token.text().strip()
+        if not token:
+            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository.')
+            self.github_token.setFocus(); return
         self.save_settings();
         if self.worker_thread: return
-        self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings); self.worker.moveToThread(self.worker_thread)
+        try:
+            GitHubBridge(token).validate_access()
+        except requests.RequestException as exc:
+            QMessageBox.critical(self, 'GitHub access failed', f'The token could not access {BRIDGE_OWNER}/{BRIDGE_REPO}.\n\n{exc}')
+            return
+        self.db.bridge = GitHubBridge(token)
+        self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
         self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
-        self.worker_thread.start(); self.start_signal.emit(self.folder.text());
+        self.worker_thread.start(); self.start_signal.emit();
 
     def stop_watch(self) -> None:
         if self.worker: self.worker.stop()
@@ -1711,7 +1675,7 @@ class MainWindow(QMainWindow):
         self.log.appendPlainText(f"[{_dt.datetime.now().strftime('%H:%M:%S')}] CORE EVENT :: {msg}")
 
     def update_monitor(self, d: dict) -> None:
-        self.monitor.setText(f"Intake vector: {self.folder.text()}\nDetected source files: {d.get('files',0)}\nBuffered signal characters: {d.get('buffered',0)}\nPending memory chunks: {d.get('pending',0)}\nLatest action: see intelligence feed\nTelemetry refresh: {_dt.datetime.now().strftime('%H:%M:%S')}")
+        self.monitor.setText(f"Intake vector: GitHub REST / {BRIDGE_OWNER}/{BRIDGE_REPO}/{BRIDGE_TRANSCRIPT_ROOT}\nDetected source files: {d.get('files',0)}\nBuffered signal characters: {d.get('buffered',0)}\nPending memory chunks: {d.get('pending',0)}\nLatest action: see intelligence feed\nTelemetry refresh: {_dt.datetime.now().strftime('%H:%M:%S')}")
 
     def set_output(self, tab: str, text: str) -> None:
         self.tab_edits[tab].setPlainText(text)
