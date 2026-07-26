@@ -44,7 +44,7 @@ class DependencyInstaller:
 DependencyInstaller.ensure()
 
 import requests  # noqa: E402
-from PySide6.QtCore import QObject, QSharedMemory, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
+from PySide6.QtCore import QObject, QSettings, QSharedMemory, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
 from PySide6.QtGui import QAction, QFont, QIcon  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QDialog, QFormLayout, QFrame, QGridLayout,
@@ -491,6 +491,35 @@ class MemoryDB:
             return 0
         return score
 
+    @staticmethod
+    def _read_app_settings(path: Path) -> Dict[str, str]:
+        """Read local UI settings so a memory restore cannot erase preferences."""
+        if not path.is_file():
+            return {}
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30) as conn:
+                has_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
+                ).fetchone()
+                if not has_table:
+                    return {}
+                return {str(key): str(value) for key, value in conn.execute("SELECT key,value FROM app_settings")}
+        except (OSError, sqlite3.Error):
+            return {}
+
+    @staticmethod
+    def _merge_app_settings(path: Path, settings: Dict[str, str]) -> None:
+        if not settings:
+            return
+        with sqlite3.connect(path, timeout=30) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.executemany(
+                "INSERT INTO app_settings(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                settings.items(),
+            )
+            conn.commit()
+
     def _recover_from_legacy_database(self) -> None:
         if LEGACY_DB_PATH.resolve() == self.path.resolve():
             return
@@ -498,9 +527,11 @@ class MemoryDB:
         active_score = self._database_score(self.path)
         if legacy_score <= active_score:
             return
+        local_settings = self._read_app_settings(self.path)
         with sqlite3.connect(f"file:{LEGACY_DB_PATH}?mode=ro", uri=True, timeout=30) as src_conn:
             with sqlite3.connect(self.path) as dest_conn:
                 src_conn.backup(dest_conn)
+        self._merge_app_settings(self.path, local_settings)
         print(
             "[LIFELINE Memory] Recovered legacy project-root database into persistent app data "
             f"({legacy_score} legacy rows vs {active_score} active rows): {self.path}"
@@ -520,7 +551,9 @@ class MemoryDB:
                 candidate.unlink(missing_ok=True)
                 return
             if self._database_score(candidate) >= self._database_score(self.path):
+                local_settings = self._read_app_settings(self.path)
                 candidate.replace(self.path)
+                self._merge_app_settings(self.path, local_settings)
                 self.restore_source = f"github:{BRIDGE_MEMORY_LATEST_PATH}"
                 print(f"[LIFELINE DB] restored memory database from GitHub bridge: {BRIDGE_MEMORY_LATEST_PATH}")
             else:
@@ -1528,7 +1561,7 @@ class MemoryExplorerDialog(QDialog):
 class MainWindow(QMainWindow):
     start_signal = Signal(); stop_signal = Signal()
     def __init__(self) -> None:
-        super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
+        super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.credential_settings = QSettings('LIFELINE', 'MemoryManager'); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
         self.setWindowTitle('LIFELINE CORE — Memory Intelligence Network'); self.resize(1480, 900); self.build_ui(); self.setup_tray(); self.load_settings(); self.restore_geometry(); self.refresh_tree(); self.refresh_stats(); QTimer.singleShot(250, self.check_ollama)
 
     def build_ui(self) -> None:
@@ -1542,7 +1575,13 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(QLabel('CORE STATUS')); header_layout.addWidget(self.status_label)
         layout.addWidget(header)
 
-        config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); layout.addWidget(config)
+        self.main_tabs = QTabWidget(); self.main_tabs.setObjectName('MainTabs'); self.main_tabs.setDocumentMode(True)
+        layout.addWidget(self.main_tabs, 1)
+
+        memory_tab = QWidget(); memory_tab.setObjectName('MemoryTab'); memory_layout = QVBoxLayout(memory_tab); memory_layout.setContentsMargins(10, 12, 10, 10); memory_layout.setSpacing(12)
+        self.main_tabs.addTab(memory_tab, 'MEMORY')
+
+        config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); memory_layout.addWidget(config)
         self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
         self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
@@ -1553,17 +1592,18 @@ class MainWindow(QMainWindow):
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
-        split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); layout.addWidget(split, 1)
-        left = self.core_panel('CORE STATUS', 'Realtime scan state and ingestion pulse.')
+        split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); memory_layout.addWidget(split, 1)
+
+        left = self.core_panel('CORE STATUS', 'Realtime scan state, ingestion pulse, and memory-processing activity.')
         ll = left.layout(); self.monitor = QLabel('GitHub transcript source:\nRemote documents: 0\nBuffered characters: 0\nPending chunks: 0\nLast poll: not started'); self.monitor.setObjectName('TelemetryBlock')
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setObjectName('ActivityFeed')
-        ll.addWidget(self.monitor); ll.addWidget(QLabel('REALTIME INTELLIGENCE FEED')); ll.addWidget(self.log,1); split.addWidget(left)
+        ll.addWidget(self.monitor); ll.addWidget(QLabel('MEMORY CORE ACTIVITY')); ll.addWidget(self.log, 1); split.addWidget(left)
 
         center = self.core_panel('OLLAMA / PROCESSING TELEMETRY', 'Prompt streams, model responses, parsed signals, and cleanup traces.')
-        cl = center.layout(); self.tabs = QTabWidget(); self.tab_edits = {}
+        cl = center.layout(); self.telemetry_tabs = QTabWidget(); self.tab_edits = {}
         for name in ['Prompt Sent','Raw Ollama Response','Parsed JSON','Cleanup Prompt','Cleanup Response']:
-            e=QPlainTextEdit(); e.setReadOnly(True); e.setObjectName('TelemetryConsole'); self.tabs.addTab(e,name); self.tab_edits[name]=e
-        cl.addWidget(self.tabs); split.addWidget(center)
+            e=QPlainTextEdit(); e.setReadOnly(True); e.setObjectName('TelemetryConsole'); self.telemetry_tabs.addTab(e,name); self.tab_edits[name]=e
+        cl.addWidget(self.telemetry_tabs); split.addWidget(center)
 
         right = self.core_panel('MEMORY NETWORK', 'People, keyword nodes, and active signal inspection.')
         rl = right.layout(); explorer_button = QPushButton('Open Full Memory Explorer'); explorer_button.setObjectName('PrimaryButton'); explorer_button.clicked.connect(self.open_memory_explorer)
@@ -1576,7 +1616,17 @@ class MainWindow(QMainWindow):
         health = QFrame(); health.setObjectName('HealthPanel'); health_layout = QVBoxLayout(health); health_layout.setContentsMargins(14, 10, 14, 10)
         health_layout.addWidget(QLabel('SYSTEM HEALTH'))
         self.db_status = QLabel(); self.db_status.setWordWrap(True); self.stats = QLabel(); self.stats.setWordWrap(True)
-        health_layout.addWidget(self.db_status); health_layout.addWidget(self.stats); layout.addWidget(health)
+        health_layout.addWidget(self.db_status); health_layout.addWidget(self.stats); memory_layout.addWidget(health)
+
+        feed_tab = QWidget(); feed_tab.setObjectName('FeedTab'); feed_layout = QVBoxLayout(feed_tab); feed_layout.setContentsMargins(10, 12, 10, 10); feed_layout.setSpacing(12)
+        self.main_tabs.addTab(feed_tab, 'FEED')
+        feed_header = self.core_panel('FEED', 'A separate workspace for the upcoming LIFELINE feed. Memory and Ollama processing messages remain in the MEMORY tab.')
+        feed_header.setObjectName('FeedPanel')
+        feed_header_layout = feed_header.layout()
+        feed_status = QLabel('FEED WORKSPACE READY\n\nFeed sources and content will appear here as they are added.')
+        feed_status.setObjectName('FeedEmptyState'); feed_status.setAlignment(Qt.AlignCenter)
+        feed_header_layout.addWidget(feed_status, 1)
+        feed_layout.addWidget(feed_header, 1)
         self.setCentralWidget(root); self.setStatusBar(QStatusBar())
 
     def core_panel(self, heading: str, caption: str) -> QFrame:
@@ -1589,7 +1639,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().setFont(QFont('Segoe UI', 10))
         self.setStyleSheet("""
             QWidget#CoreRoot { background: #050914; color: #d9f7ff; }
-            QFrame#HeroPanel, QFrame#ConfigPanel, QFrame#CorePanel, QFrame#HealthPanel { background: rgba(9, 19, 38, 235); border: 1px solid #17445c; border-radius: 14px; }
+            QFrame#HeroPanel, QFrame#ConfigPanel, QFrame#CorePanel, QFrame#FeedPanel, QFrame#HealthPanel { background: rgba(9, 19, 38, 235); border: 1px solid #17445c; border-radius: 14px; }
             QDialog { background: #050914; color: #d9f7ff; }
             QFrame#ExplorerHero, QFrame#ExplorerTools, QFrame#ExplorerDetail { background: rgba(9, 19, 38, 245); border: 1px solid #17445c; border-radius: 14px; }
             QLabel#ExplorerTitle { color: #7df9ff; font-size: 26px; font-weight: 900; letter-spacing: 3px; }
@@ -1604,6 +1654,7 @@ class MainWindow(QMainWindow):
             QPlainTextEdit#ActivityFeed { color: #8dffcf; font-family: Consolas, 'Cascadia Mono', monospace; }
             QPlainTextEdit#TelemetryConsole { color: #b7e8ff; font-family: Consolas, 'Cascadia Mono', monospace; }
             QLabel#TelemetryBlock { color: #e6fbff; background: #081827; border: 1px solid #1d6a83; border-radius: 10px; padding: 10px; }
+            QLabel#FeedEmptyState { color: #8fb7c8; background: #07111f; border: 1px dashed #247798; border-radius: 12px; padding: 48px; font-size: 14px; }
             QPushButton { background: #0c2539; color: #d9fbff; border: 1px solid #247798; border-radius: 8px; padding: 8px 10px; font-weight: 800; }
             QPushButton:hover { background: #123c57; border-color: #41dfff; }
             QPushButton#PrimaryButton { background: #0b5b63; border-color: #30f2c6; color: white; }
@@ -1611,6 +1662,8 @@ class MainWindow(QMainWindow):
             QTabWidget::pane { border: 1px solid #1c526d; border-radius: 8px; }
             QTabBar::tab { background: #081827; color: #9fcdda; padding: 8px 10px; border: 1px solid #17445c; border-top-left-radius: 8px; border-top-right-radius: 8px; }
             QTabBar::tab:selected { background: #0f344d; color: #7df9ff; }
+            QTabWidget#MainTabs > QTabBar::tab { min-width: 150px; padding: 12px 24px; font-size: 12px; font-weight: 900; letter-spacing: 2px; }
+            QTabWidget#MainTabs > QTabBar::tab:selected { background: #0b5b63; color: #ffffff; border-color: #30f2c6; }
             QHeaderView::section { background: #0f344d; color: #7df9ff; padding: 6px; border: 0; }
         """)
 
@@ -1660,10 +1713,12 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
-        self.github_token.setText(_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        saved_token = str(self.credential_settings.value('github_token', '') or '').strip()
+        self.github_token.setText(_bridge_token() or saved_token); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
         self.chunk.setValue(self.settings.int('chunk_size')); self.min_idle.setValue(self.settings.int('minimum_idle_chunk_size')); self.max_chunk.setValue(self.settings.int('maximum_chunk_size')); self.idle.setValue(self.settings.int('idle_timeout')); self.conf.setValue(self.settings.float('confidence_threshold'))
 
     def save_settings(self) -> None:
+        self.credential_settings.setValue('github_token', self.github_token.text().strip()); self.credential_settings.sync()
         for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
