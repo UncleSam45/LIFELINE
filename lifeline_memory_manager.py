@@ -789,9 +789,6 @@ class MemoryDB:
 
     def clear_transcript_history(self) -> Tuple[int, str]:
         """Forget processed chunks while preserving all extracted memory records."""
-        ok, snapshot = self.mirror_to_external_backup(create_snapshot=True)
-        if not ok:
-            raise RuntimeError(f"Backup snapshot failed; transcript history was not cleared: {snapshot}")
         with self.lock, self.connect() as conn:
             try:
                 conn.execute("BEGIN")
@@ -812,10 +809,14 @@ class MemoryDB:
                 conn.rollback()
                 raise
         self.last_write = now_human()
-        ok, detail = self.mirror_to_external_backup(create_snapshot=False)
-        if not ok:
-            raise RuntimeError(f"Transcript history cleared, but mirror update failed: {detail}")
-        return deleted, snapshot
+        # The reset itself is local and must not depend on GitHub availability
+        # or token write permissions. Mirroring is best-effort afterward.
+        try:
+            ok, detail = self.mirror_to_external_backup(create_snapshot=False)
+            mirror_status = "mirror updated" if ok else f"mirror warning: {detail}"
+        except Exception as exc:
+            mirror_status = f"mirror warning: {exc}"
+        return deleted, mirror_status
 
     def _person_id(self, conn: sqlite3.Connection, name: str) -> int:
         name = name.strip().upper()
@@ -1810,7 +1811,13 @@ class MainWindow(QMainWindow):
 
     def stop_watch(self) -> None:
         if self.worker: self.worker.stop()
-        if self.worker_thread: self.worker_thread.quit(); self.worker_thread.wait(4000); self.worker_thread=None; self.worker=None
+        if self.worker_thread:
+            self.worker_thread.quit()
+            # Never discard a live QThread reference: doing so causes Qt's
+            # fatal "QThread destroyed while thread is still running" abort.
+            self.worker_thread.wait()
+            self.worker_thread = None
+            self.worker = None
 
     def append_log(self, msg: str) -> None:
         self.log.appendPlainText(f"[{_dt.datetime.now().strftime('%H:%M:%S')}] CORE EVENT :: {msg}")
@@ -1940,15 +1947,16 @@ class MainWindow(QMainWindow):
             # Destroying the worker also discards its in-memory remote entry
             # counters, so Monitor GitHub starts again from entry zero.
             self.stop_watch()
-            deleted, snapshot = self.db.clear_transcript_history()
+            deleted, mirror_status = self.db.clear_transcript_history()
             self.refresh_all()
-            self.append_log(f'Reset transcript finder ({deleted} processed chunks forgotten). Backup snapshot: {snapshot}')
+            self.append_log(f'Reset transcript finder ({deleted} processed chunks forgotten); {mirror_status}.')
             QMessageBox.information(
                 self,
                 'Transcript Finder Reset',
                 f'Forgot {deleted} processed transcript chunks. Existing extracted memories were preserved.\n\n'
-                'Click Monitor GitHub to reprocess the remote transcripts.',
+                'Monitoring will restart automatically and reprocess the remote transcripts.',
             )
+            QTimer.singleShot(0, self.start_watch)
         except Exception as exc:
             self.show_error(f'Reset transcript finder failed: {exc}')
             QMessageBox.critical(self, 'Reset Transcript Finder', f'Failed: {exc}')
@@ -1983,14 +1991,16 @@ def main() -> int:
     _INSTANCE_GUARD = instance_guard
 
     w = MainWindow()
-    if args.auto_start:
+    # The memory manager is a background service: always start monitoring when
+    # credentials are available and keep the full window out of the way.
+    if w.github_token.text().strip():
         QTimer.singleShot(500, w.start_watch)
-        if w.tray_icon:
-            QTimer.singleShot(800, w.hide_to_tray)
-        else:
-            w.showMinimized()
     else:
-        w.show()
+        w.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
+    if w.tray_icon:
+        w.hide()
+    else:
+        w.showMinimized()
     return app.exec()
 
 
