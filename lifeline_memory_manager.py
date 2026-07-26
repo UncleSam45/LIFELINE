@@ -76,6 +76,8 @@ APP_ROOT = Path(__file__).resolve().parent
 APP_DATA_DIR = _default_documents_dir() / "KINDROIDXL" / "kindroidxl_data"
 DEFAULT_BACKUP_ROOT = _default_documents_dir() / "KINDROIDXL-backups"
 DB_PATH = APP_DATA_DIR / "lifeline_memory.db"
+BRIDGE_TOKEN_PATH = APP_DATA_DIR / ".lifeline_bridge_token"
+KINDROID_API_KEY_PATH = APP_DATA_DIR / ".lifeline_kindroid_api_key"
 LEGACY_DB_PATH = Path(__file__).with_name("lifeline_memory.db")
 RUNTIME_DB_PATH = DB_PATH
 RUNTIME_BACKUP_ROOT = DEFAULT_BACKUP_ROOT
@@ -98,6 +100,52 @@ def _bridge_token() -> str:
         if value:
             return value
     return ""
+
+
+def _saved_bridge_token() -> str:
+    """Read the local token without placing it in the mirrored memory database."""
+    try:
+        return BRIDGE_TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _save_bridge_token(token: str) -> None:
+    """Persist the bridge token locally for the next manager launch."""
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        BRIDGE_TOKEN_PATH.unlink(missing_ok=True)
+        return
+    BRIDGE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = BRIDGE_TOKEN_PATH.with_suffix(".tmp")
+    temporary_path.write_text(clean_token, encoding="utf-8")
+    try:
+        temporary_path.chmod(0o600)
+    except OSError:
+        pass
+    temporary_path.replace(BRIDGE_TOKEN_PATH)
+
+
+def _saved_kindroid_api_key() -> str:
+    try:
+        return KINDROID_API_KEY_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _save_kindroid_api_key(api_key: str) -> None:
+    clean_key = str(api_key or "").strip()
+    if not clean_key:
+        KINDROID_API_KEY_PATH.unlink(missing_ok=True)
+        return
+    KINDROID_API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = KINDROID_API_KEY_PATH.with_suffix(".tmp")
+    temporary_path.write_text(clean_key, encoding="utf-8")
+    try:
+        temporary_path.chmod(0o600)
+    except OSError:
+        pass
+    temporary_path.replace(KINDROID_API_KEY_PATH)
 
 
 class GitHubBridge:
@@ -157,9 +205,9 @@ class GitHubBridge:
         )
         response.raise_for_status()
 
-    def transcript_documents(self) -> List[Tuple[str, List[str], List[str]]]:
-        """Return bridge transcript paths, entries, and authoritative participants."""
-        documents: List[Tuple[str, List[str], List[str]]] = []
+    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str]]:
+        """Return bridge transcript paths, entries, participants, and group IDs."""
+        documents: List[Tuple[str, List[str], List[str], str]] = []
         config_data, _config_sha = self.read_bytes("config.json")
         try:
             config = json.loads(config_data.decode("utf-8")) if config_data else {}
@@ -188,12 +236,12 @@ class GitHubBridge:
                 payload = json.loads(data.decode("utf-8"))
                 raw_entries = payload.get("transcript", []) if isinstance(payload, dict) else []
                 entries = [str(entry).strip() for entry in raw_entries if str(entry).strip()]
+                group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
                 if not participants:
-                    group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
                     participants = participants_by_group.get(group_id, [])
-                documents.append((str(item.get("path")), entries, participants))
+                documents.append((str(item.get("path")), entries, participants, group_id))
         return documents
 
 GENERIC_KEYWORDS = {
@@ -294,6 +342,9 @@ def _valid_person_subject(name: str, allowed: Set[str] | None = None, known: Set
 
 
 def _load_feeder_api_key() -> str:
+    configured = os.environ.get("KINDROID_API_KEY", "").strip() or _saved_kindroid_api_key()
+    if configured:
+        return configured
     try:
         import modules.feeder as feeder  # pylint: disable=import-outside-toplevel
 
@@ -303,6 +354,28 @@ def _load_feeder_api_key() -> str:
     if not bool(state.get("remember_api_key", True)):
         return ""
     return str(state.get("api_key", "")).strip()
+
+
+def _execute_kindroid_request(endpoint: str, api_key: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
+    """Send a context reminder without depending on the main app's feeder module."""
+    try:
+        response = requests.post(
+            f"https://api.kindroid.ai/v1/{endpoint.lstrip('/')}",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "text/plain",
+                "Content-Type": "application/json",
+                "X-Kindroid-Requester": KINDROID_REQUESTER,
+            },
+            json=payload,
+            timeout=45,
+        )
+        detail = response.text.strip().replace("\n", " ")[:180]
+        if response.ok:
+            return True, f"HTTP {response.status_code}"
+        return False, f"HTTP {response.status_code}: {detail or response.reason}"
+    except requests.RequestException as exc:
+        return False, str(exc)
 
 
 def _load_groupmaker_session_for_sources(source_file: str) -> Dict[str, Any]:
@@ -346,18 +419,11 @@ def _send_group_context_reminder(group_id: str, description: str) -> Tuple[bool,
         return False, "missing group_id"
     if not api_key.startswith("kn_"):
         return False, "missing remembered Kindroid API key"
-    try:
-        import modules.feeder as feeder  # pylint: disable=import-outside-toplevel
-
-        ok, status, detail = feeder.execute_api_request(
-            tool_key="send_groupchat_message",
-            api_key=api_key,
-            payload={"group_id": group_id, "message": f"*CONTEXT REMINDER: {description}*"},
-            requester=KINDROID_REQUESTER,
-        )
-        return ok, status if ok else f"{status}: {detail[:180]}"
-    except Exception as exc:
-        return False, str(exc)
+    return _execute_kindroid_request(
+        "groupchats-user-message",
+        api_key,
+        {"group_id": group_id, "message": f"*CONTEXT REMINDER: {description}*"},
+    )
 
 
 
@@ -367,22 +433,11 @@ def _send_direct_context_reminder(ai_id: str, description: str) -> Tuple[bool, s
         return False, "missing ai_id"
     if not api_key.startswith("kn_"):
         return False, "missing remembered Kindroid API key"
-    try:
-        import modules.feeder as feeder  # pylint: disable=import-outside-toplevel
-
-        payload = feeder.build_send_message_payload(
-            ai_id=ai_id,
-            message=f"*CONTEXT REMINDER: {description}*",
-        )
-        ok, status, detail = feeder.execute_api_request(
-            tool_key="send_message",
-            api_key=api_key,
-            payload=payload,
-            requester=KINDROID_REQUESTER,
-        )
-        return ok, status if ok else f"{status}: {detail[:180]}"
-    except Exception as exc:
-        return False, str(exc)
+    return _execute_kindroid_request(
+        "send-message",
+        api_key,
+        {"ai_id": ai_id, "message": f"*CONTEXT REMINDER: {description}*", "stream": False},
+    )
 
 
 def _record_latest_group_context_reminders(session: Dict[str, Any], reminders: List[Dict[str, str]]) -> None:
@@ -731,6 +786,37 @@ class MemoryDB:
         if not ok:
             raise RuntimeError(f"Memory cleared, but mirror update failed: {detail}")
         return deleted, snapshot
+
+    def clear_transcript_history(self) -> Tuple[int, str]:
+        """Forget processed chunks while preserving all extracted memory records."""
+        with self.lock, self.connect() as conn:
+            try:
+                conn.execute("BEGIN")
+                deleted = int(conn.execute("SELECT COUNT(*) FROM transcript_chunks").fetchone()[0])
+                # Existing memories remain useful, but cannot retain foreign
+                # keys to chunk rows that are deliberately being forgotten.
+                conn.execute("UPDATE memory_events SET source_chunk_id=NULL WHERE source_chunk_id IS NOT NULL")
+                conn.execute("DELETE FROM transcript_chunks")
+                conn.execute("DELETE FROM sqlite_sequence WHERE name='transcript_chunks'")
+                cleared_at = self._mark_changed(conn, "clear_transcript_history")
+                conn.execute(
+                    "INSERT INTO app_settings(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("transcript_history_cleared_at", cleared_at),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.last_write = now_human()
+        # The reset itself is local and must not depend on GitHub availability
+        # or token write permissions. Mirroring is best-effort afterward.
+        try:
+            ok, detail = self.mirror_to_external_backup(create_snapshot=False)
+            mirror_status = "mirror updated" if ok else f"mirror warning: {detail}"
+        except Exception as exc:
+            mirror_status = f"mirror warning: {exc}"
+        return deleted, mirror_status
 
     def _person_id(self, conn: sqlite3.Connection, name: str) -> int:
         name = name.strip().upper()
@@ -1172,6 +1258,7 @@ class ProcessingWorker(QObject):
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
         self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
         self.remote_participants: Dict[str, List[str]] = {}
+        self.remote_group_ids: Dict[str, str] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
         self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
@@ -1206,8 +1293,9 @@ class ProcessingWorker(QObject):
         self.stop()
 
     def poll_github_transcripts(self) -> None:
-        for source, entries, participants in self.bridge.transcript_documents():
+        for source, entries, participants, group_id in self.bridge.transcript_documents():
             self.remote_participants[source] = participants
+            self.remote_group_ids[source] = group_id
             old_count = self.remote_entry_counts.get(source, 0)
             if len(entries) < old_count:
                 old_count = 0
@@ -1226,6 +1314,20 @@ class ProcessingWorker(QObject):
             self.log.emit(f"Skipped already-processed transcript chunk from {source} without calling Ollama.")
             return
         session = _load_groupmaker_session_for_sources(source)
+        # The transcript document is authoritative for its own group.  The
+        # standalone manager may not have the local GROUPMAKER state file, and
+        # the state fallback may point at a different recently touched group.
+        transcript_source = next(
+            (item for item in consumed if self.remote_group_ids.get(item)),
+            "",
+        )
+        transcript_group_id = self.remote_group_ids.get(transcript_source, "")
+        if transcript_group_id and str(session.get("group_id", "")).strip() != transcript_group_id:
+            session = {
+                "group_id": transcript_group_id,
+                "names": self.remote_participants.get(transcript_source, []),
+                "ai_list": [],
+            }
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
         if not group_people:
             group_people = list(dict.fromkeys(
@@ -1545,9 +1647,11 @@ class MainWindow(QMainWindow):
         config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); layout.addWidget(config)
         self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
         self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
+        self.kindroid_api_key = QLineEdit(); self.kindroid_api_key.setEchoMode(QLineEdit.Password)
+        self.kindroid_api_key.setPlaceholderText('Kindroid API key beginning with kn_')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
         start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch)
-        widgets = [('GitHub Fine-grained Token', self.github_token), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
+        widgets = [('GitHub Fine-grained Token', self.github_token), ('Kindroid API Key', self.kindroid_api_key), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
         for i,(lab,w) in enumerate(widgets): top.addWidget(QLabel(lab),0,i*2); top.addWidget(w,0,i*2+1)
         top.addWidget(check,1,0); top.addWidget(selftest,1,5); top.addWidget(start,1,1); top.addWidget(stop,1,2)
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
@@ -1569,8 +1673,8 @@ class MainWindow(QMainWindow):
         rl = right.layout(); explorer_button = QPushButton('Open Full Memory Explorer'); explorer_button.setObjectName('PrimaryButton'); explorer_button.clicked.connect(self.open_memory_explorer)
         self.treew = QTreeWidget(); self.treew.setHeaderLabels(['Memory Graph / Signal Nodes']); self.treew.itemSelectionChanged.connect(self.load_node)
         self.person = QLineEdit(); self.keyword = QLineEdit(); self.summary = QPlainTextEdit(); self.rev = QLabel(''); self.cleaned = QLabel(''); self.raw_events = QPlainTextEdit(); self.raw_events.setReadOnly(True)
-        save=QPushButton('Commit Active Summary'); save.clicked.connect(self.save_summary); reclean=QPushButton('Reprocess with Ollama'); reclean.clicked.connect(self.reclean_node); del_event=QPushButton('Delete Latest Memory Event'); del_event.clicked.connect(self.delete_latest_event); delete=QPushButton('Delete Keyword Node'); delete.clicked.connect(self.delete_node); clear_all=QPushButton('PURGE MEMORY CORE'); clear_all.setObjectName('DangerButton'); clear_all.clicked.connect(self.clear_all_memory)
-        rl.addWidget(explorer_button); rl.addWidget(self.treew,1); rl.addWidget(QLabel('ACTIVE SIGNAL INSPECTOR')); form=QFormLayout(); form.addRow('Entity',self.person); form.addRow('Keyword Signal',self.keyword); form.addRow('Revision Count',self.rev); form.addRow('Last Cleaned',self.cleaned); rl.addLayout(form); rl.addWidget(QLabel('Active Summary')); rl.addWidget(self.summary); rl.addWidget(QLabel('Raw Related Events')); rl.addWidget(self.raw_events); rl.addWidget(save); rl.addWidget(reclean); rl.addWidget(del_event); rl.addWidget(delete); rl.addWidget(clear_all); split.addWidget(right)
+        save=QPushButton('Commit Active Summary'); save.clicked.connect(self.save_summary); reclean=QPushButton('Reprocess with Ollama'); reclean.clicked.connect(self.reclean_node); del_event=QPushButton('Delete Latest Memory Event'); del_event.clicked.connect(self.delete_latest_event); delete=QPushButton('Delete Keyword Node'); delete.clicked.connect(self.delete_node); reset_transcripts=QPushButton('RESET TRANSCRIPT FINDER'); reset_transcripts.setObjectName('DangerButton'); reset_transcripts.clicked.connect(self.clear_transcript_history); clear_all=QPushButton('PURGE MEMORY CORE'); clear_all.setObjectName('DangerButton'); clear_all.clicked.connect(self.clear_all_memory)
+        rl.addWidget(explorer_button); rl.addWidget(self.treew,1); rl.addWidget(QLabel('ACTIVE SIGNAL INSPECTOR')); form=QFormLayout(); form.addRow('Entity',self.person); form.addRow('Keyword Signal',self.keyword); form.addRow('Revision Count',self.rev); form.addRow('Last Cleaned',self.cleaned); rl.addLayout(form); rl.addWidget(QLabel('Active Summary')); rl.addWidget(self.summary); rl.addWidget(QLabel('Raw Related Events')); rl.addWidget(self.raw_events); rl.addWidget(save); rl.addWidget(reclean); rl.addWidget(del_event); rl.addWidget(delete); rl.addWidget(reset_transcripts); rl.addWidget(clear_all); split.addWidget(right)
         split.setSizes([360, 560, 460])
 
         health = QFrame(); health.setObjectName('HealthPanel'); health_layout = QVBoxLayout(health); health_layout.setContentsMargins(14, 10, 14, 10)
@@ -1660,10 +1764,13 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
-        self.github_token.setText(_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        self.github_token.setText(_bridge_token() or _saved_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        self.kindroid_api_key.setText(os.environ.get('KINDROID_API_KEY', '').strip() or _saved_kindroid_api_key())
         self.chunk.setValue(self.settings.int('chunk_size')); self.min_idle.setValue(self.settings.int('minimum_idle_chunk_size')); self.max_chunk.setValue(self.settings.int('maximum_chunk_size')); self.idle.setValue(self.settings.int('idle_timeout')); self.conf.setValue(self.settings.float('confidence_threshold'))
 
     def save_settings(self) -> None:
+        _save_bridge_token(self.github_token.text())
+        _save_kindroid_api_key(self.kindroid_api_key.text())
         for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
@@ -1685,6 +1792,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository.')
             self.github_token.setFocus(); return
         self.save_settings();
+        kindroid_key = self.kindroid_api_key.text().strip()
+        if kindroid_key and not kindroid_key.startswith('kn_'):
+            QMessageBox.warning(self, 'Invalid Kindroid API key', 'The Kindroid API key must begin with kn_. Context reminders cannot be delivered with this key.')
+            self.kindroid_api_key.setFocus(); return
+        if not kindroid_key:
+            self.append_log('Kindroid API key is empty: transcripts can be processed, but context reminders cannot be delivered to Kindroid.')
         if self.worker_thread: return
         try:
             GitHubBridge(token).validate_access()
@@ -1698,7 +1811,13 @@ class MainWindow(QMainWindow):
 
     def stop_watch(self) -> None:
         if self.worker: self.worker.stop()
-        if self.worker_thread: self.worker_thread.quit(); self.worker_thread.wait(4000); self.worker_thread=None; self.worker=None
+        if self.worker_thread:
+            self.worker_thread.quit()
+            # Never discard a live QThread reference: doing so causes Qt's
+            # fatal "QThread destroyed while thread is still running" abort.
+            self.worker_thread.wait()
+            self.worker_thread = None
+            self.worker = None
 
     def append_log(self, msg: str) -> None:
         self.log.appendPlainText(f"[{_dt.datetime.now().strftime('%H:%M:%S')}] CORE EVENT :: {msg}")
@@ -1815,6 +1934,33 @@ class MainWindow(QMainWindow):
             self.show_error(f'Clear all memory failed: {exc}')
             QMessageBox.critical(self, 'Clear All Memory', f'Failed: {exc}')
 
+    def clear_transcript_history(self) -> None:
+        if QMessageBox.question(
+            self,
+            'Reset Transcript Finder',
+            'Forget which transcript chunks were already processed?\n\n'
+            'Existing people, memories, and keyword summaries will be preserved. '
+            'The next monitoring run will fetch and reprocess all current remote transcripts, which may create duplicate memories.',
+        ) != QMessageBox.Yes:
+            return
+        try:
+            # Destroying the worker also discards its in-memory remote entry
+            # counters, so Monitor GitHub starts again from entry zero.
+            self.stop_watch()
+            deleted, mirror_status = self.db.clear_transcript_history()
+            self.refresh_all()
+            self.append_log(f'Reset transcript finder ({deleted} processed chunks forgotten); {mirror_status}.')
+            QMessageBox.information(
+                self,
+                'Transcript Finder Reset',
+                f'Forgot {deleted} processed transcript chunks. Existing extracted memories were preserved.\n\n'
+                'Monitoring will restart automatically and reprocess the remote transcripts.',
+            )
+            QTimer.singleShot(0, self.start_watch)
+        except Exception as exc:
+            self.show_error(f'Reset transcript finder failed: {exc}')
+            QMessageBox.critical(self, 'Reset Transcript Finder', f'Failed: {exc}')
+
     def closeEvent(self, event) -> None:
         self.save_settings(); self.settings.set('window_geometry', base64.b64encode(bytes(self.saveGeometry())).decode('ascii'))
         if self.tray_icon and not self.force_quit:
@@ -1845,14 +1991,16 @@ def main() -> int:
     _INSTANCE_GUARD = instance_guard
 
     w = MainWindow()
-    if args.auto_start:
+    # The memory manager is a background service: always start monitoring when
+    # credentials are available and keep the full window out of the way.
+    if w.github_token.text().strip():
         QTimer.singleShot(500, w.start_watch)
-        if w.tray_icon:
-            QTimer.singleShot(800, w.hide_to_tray)
-        else:
-            w.showMinimized()
     else:
-        w.show()
+        w.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
+    if w.tray_icon:
+        w.hide()
+    else:
+        w.showMinimized()
     return app.exec()
 
 
