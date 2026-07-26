@@ -1542,7 +1542,13 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(QLabel('CORE STATUS')); header_layout.addWidget(self.status_label)
         layout.addWidget(header)
 
-        config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); layout.addWidget(config)
+        self.main_tabs = QTabWidget(); self.main_tabs.setObjectName('MainTabs'); self.main_tabs.setDocumentMode(True)
+        layout.addWidget(self.main_tabs, 1)
+
+        memory_tab = QWidget(); memory_tab.setObjectName('MemoryTab'); memory_layout = QVBoxLayout(memory_tab); memory_layout.setContentsMargins(10, 12, 10, 10); memory_layout.setSpacing(12)
+        self.main_tabs.addTab(memory_tab, 'MEMORY')
+
+        config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); memory_layout.addWidget(config)
         self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
         self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
@@ -1553,17 +1559,13 @@ class MainWindow(QMainWindow):
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
-        split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); layout.addWidget(split, 1)
-        left = self.core_panel('CORE STATUS', 'Realtime scan state and ingestion pulse.')
-        ll = left.layout(); self.monitor = QLabel('GitHub transcript source:\nRemote documents: 0\nBuffered characters: 0\nPending chunks: 0\nLast poll: not started'); self.monitor.setObjectName('TelemetryBlock')
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setObjectName('ActivityFeed')
-        ll.addWidget(self.monitor); ll.addWidget(QLabel('REALTIME INTELLIGENCE FEED')); ll.addWidget(self.log,1); split.addWidget(left)
+        split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); memory_layout.addWidget(split, 1)
 
         center = self.core_panel('OLLAMA / PROCESSING TELEMETRY', 'Prompt streams, model responses, parsed signals, and cleanup traces.')
-        cl = center.layout(); self.tabs = QTabWidget(); self.tab_edits = {}
+        cl = center.layout(); self.telemetry_tabs = QTabWidget(); self.tab_edits = {}
         for name in ['Prompt Sent','Raw Ollama Response','Parsed JSON','Cleanup Prompt','Cleanup Response']:
-            e=QPlainTextEdit(); e.setReadOnly(True); e.setObjectName('TelemetryConsole'); self.tabs.addTab(e,name); self.tab_edits[name]=e
-        cl.addWidget(self.tabs); split.addWidget(center)
+            e=QPlainTextEdit(); e.setReadOnly(True); e.setObjectName('TelemetryConsole'); self.telemetry_tabs.addTab(e,name); self.tab_edits[name]=e
+        cl.addWidget(self.telemetry_tabs); split.addWidget(center)
 
         right = self.core_panel('MEMORY NETWORK', 'People, keyword nodes, and active signal inspection.')
         rl = right.layout(); explorer_button = QPushButton('Open Full Memory Explorer'); explorer_button.setObjectName('PrimaryButton'); explorer_button.clicked.connect(self.open_memory_explorer)
@@ -1571,12 +1573,24 @@ class MainWindow(QMainWindow):
         self.person = QLineEdit(); self.keyword = QLineEdit(); self.summary = QPlainTextEdit(); self.rev = QLabel(''); self.cleaned = QLabel(''); self.raw_events = QPlainTextEdit(); self.raw_events.setReadOnly(True)
         save=QPushButton('Commit Active Summary'); save.clicked.connect(self.save_summary); reclean=QPushButton('Reprocess with Ollama'); reclean.clicked.connect(self.reclean_node); del_event=QPushButton('Delete Latest Memory Event'); del_event.clicked.connect(self.delete_latest_event); delete=QPushButton('Delete Keyword Node'); delete.clicked.connect(self.delete_node); clear_all=QPushButton('PURGE MEMORY CORE'); clear_all.setObjectName('DangerButton'); clear_all.clicked.connect(self.clear_all_memory)
         rl.addWidget(explorer_button); rl.addWidget(self.treew,1); rl.addWidget(QLabel('ACTIVE SIGNAL INSPECTOR')); form=QFormLayout(); form.addRow('Entity',self.person); form.addRow('Keyword Signal',self.keyword); form.addRow('Revision Count',self.rev); form.addRow('Last Cleaned',self.cleaned); rl.addLayout(form); rl.addWidget(QLabel('Active Summary')); rl.addWidget(self.summary); rl.addWidget(QLabel('Raw Related Events')); rl.addWidget(self.raw_events); rl.addWidget(save); rl.addWidget(reclean); rl.addWidget(del_event); rl.addWidget(delete); rl.addWidget(clear_all); split.addWidget(right)
-        split.setSizes([360, 560, 460])
+        split.setSizes([650, 650])
 
         health = QFrame(); health.setObjectName('HealthPanel'); health_layout = QVBoxLayout(health); health_layout.setContentsMargins(14, 10, 14, 10)
         health_layout.addWidget(QLabel('SYSTEM HEALTH'))
         self.db_status = QLabel(); self.db_status.setWordWrap(True); self.stats = QLabel(); self.stats.setWordWrap(True)
-        health_layout.addWidget(self.db_status); health_layout.addWidget(self.stats); layout.addWidget(health)
+        health_layout.addWidget(self.db_status); health_layout.addWidget(self.stats); memory_layout.addWidget(health)
+
+        feed_tab = QWidget(); feed_tab.setObjectName('FeedTab'); feed_layout = QVBoxLayout(feed_tab); feed_layout.setContentsMargins(10, 12, 10, 10); feed_layout.setSpacing(12)
+        self.main_tabs.addTab(feed_tab, 'FEED')
+        feed_header = self.core_panel('REALTIME INTELLIGENCE FEED', 'Live transcript intake, processing activity, memory commits, and errors from the LIFELINE core.')
+        feed_header.setObjectName('FeedPanel')
+        feed_header_layout = feed_header.layout()
+        self.monitor = QLabel('GitHub transcript source:\nRemote documents: 0\nBuffered characters: 0\nPending chunks: 0\nLast poll: not started'); self.monitor.setObjectName('TelemetryBlock')
+        feed_header_layout.addWidget(self.monitor)
+        feed_layout.addWidget(feed_header)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setObjectName('ActivityFeed')
+        self.log.setPlaceholderText('Core activity will appear here when monitoring starts...')
+        feed_layout.addWidget(self.log, 1)
         self.setCentralWidget(root); self.setStatusBar(QStatusBar())
 
     def core_panel(self, heading: str, caption: str) -> QFrame:
@@ -1589,7 +1603,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().setFont(QFont('Segoe UI', 10))
         self.setStyleSheet("""
             QWidget#CoreRoot { background: #050914; color: #d9f7ff; }
-            QFrame#HeroPanel, QFrame#ConfigPanel, QFrame#CorePanel, QFrame#HealthPanel { background: rgba(9, 19, 38, 235); border: 1px solid #17445c; border-radius: 14px; }
+            QFrame#HeroPanel, QFrame#ConfigPanel, QFrame#CorePanel, QFrame#FeedPanel, QFrame#HealthPanel { background: rgba(9, 19, 38, 235); border: 1px solid #17445c; border-radius: 14px; }
             QDialog { background: #050914; color: #d9f7ff; }
             QFrame#ExplorerHero, QFrame#ExplorerTools, QFrame#ExplorerDetail { background: rgba(9, 19, 38, 245); border: 1px solid #17445c; border-radius: 14px; }
             QLabel#ExplorerTitle { color: #7df9ff; font-size: 26px; font-weight: 900; letter-spacing: 3px; }
@@ -1611,6 +1625,8 @@ class MainWindow(QMainWindow):
             QTabWidget::pane { border: 1px solid #1c526d; border-radius: 8px; }
             QTabBar::tab { background: #081827; color: #9fcdda; padding: 8px 10px; border: 1px solid #17445c; border-top-left-radius: 8px; border-top-right-radius: 8px; }
             QTabBar::tab:selected { background: #0f344d; color: #7df9ff; }
+            QTabWidget#MainTabs > QTabBar::tab { min-width: 150px; padding: 12px 24px; font-size: 12px; font-weight: 900; letter-spacing: 2px; }
+            QTabWidget#MainTabs > QTabBar::tab:selected { background: #0b5b63; color: #ffffff; border-color: #30f2c6; }
             QHeaderView::section { background: #0f344d; color: #7df9ff; padding: 6px; border: 0; }
         """)
 
