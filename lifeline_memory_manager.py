@@ -157,9 +157,28 @@ class GitHubBridge:
         )
         response.raise_for_status()
 
-    def transcript_documents(self) -> List[Tuple[str, List[str]]]:
-        """Return bridge transcript paths and their normalized transcript entries."""
-        documents: List[Tuple[str, List[str]]] = []
+    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], Dict[str, Any]]]:
+        """Return transcript entries plus bridge-backed GROUPMAKER session metadata."""
+        documents: List[Tuple[str, List[str], List[str], Dict[str, Any]]] = []
+        config_data, _config_sha = self.read_bytes("config.json")
+        try:
+            config = json.loads(config_data.decode("utf-8")) if config_data else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            config = {}
+        sessions = config.get("groupmaker_sessions", []) if isinstance(config, dict) else []
+        sessions_by_group: Dict[str, Dict[str, Any]] = {}
+        for session in sessions if isinstance(sessions, list) else []:
+            if not isinstance(session, dict):
+                continue
+            group_id = str(session.get("group_id") or "").strip()
+            raw_names = session.get("names", [])
+            names = list(dict.fromkeys(str(name).strip() for name in raw_names if str(name).strip())) if isinstance(raw_names, list) else []
+            if group_id and names:
+                current = sessions_by_group.get(group_id)
+                candidate_rank = (not bool(str(session.get("closed_at", "")).strip()), str(session.get("touched_at", "")))
+                current_rank = (not bool(str(current.get("closed_at", "")).strip()), str(current.get("touched_at", ""))) if current else (False, "")
+                if current is None or candidate_rank > current_rank:
+                    sessions_by_group[group_id] = {**session, "group_id": group_id, "names": names}
         for group in self.list_tree(BRIDGE_TRANSCRIPT_ROOT):
             if group.get("type") != "dir":
                 continue
@@ -173,7 +192,15 @@ class GitHubBridge:
                 payload = json.loads(data.decode("utf-8"))
                 raw_entries = payload.get("transcript", []) if isinstance(payload, dict) else []
                 entries = [str(entry).strip() for entry in raw_entries if str(entry).strip()]
-                documents.append((str(item.get("path")), entries))
+                raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
+                participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
+                group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
+                session = dict(sessions_by_group.get(group_id, {}))
+                if not participants:
+                    participants = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
+                if group_id and participants:
+                    session = {**session, "group_id": group_id, "names": participants}
+                documents.append((str(item.get("path")), entries, participants, session))
         return documents
 
 GENERIC_KEYWORDS = {
@@ -1136,9 +1163,12 @@ class TranscriptBuffer:
         return self.size >= self.target or (self.size >= self.minimum_idle and time.time() - self.last_update >= idle_timeout)
 
     def pop_chunk(self) -> Tuple[str, Dict[str, int]]:
-        remaining = self.maximum; parts = []; consumed: Dict[str, int] = {}
+        remaining = self.maximum; parts = []; consumed: Dict[str, int] = {}; source = self.items[0].source if self.items else ""
         while self.items and remaining > 0:
-            item = self.items[0]; take = min(len(item.text), remaining)
+            item = self.items[0]
+            if parts and item.source != source:
+                break
+            take = min(len(item.text), remaining)
             parts.append(item.text[:take]); consumed[item.source] = consumed.get(item.source, 0) + take
             item.text = item.text[take:]; self.size -= take; remaining -= take
             if not item.text: self.items.pop(0)
@@ -1151,6 +1181,8 @@ class ProcessingWorker(QObject):
     def __init__(self, db: MemoryDB, settings: AppSettings, github_token: str) -> None:
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
         self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
+        self.remote_participants: Dict[str, List[str]] = {}
+        self.remote_groupmaker_sessions: Dict[str, Dict[str, Any]] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
         self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
@@ -1185,7 +1217,9 @@ class ProcessingWorker(QObject):
         self.stop()
 
     def poll_github_transcripts(self) -> None:
-        for source, entries in self.bridge.transcript_documents():
+        for source, entries, participants, session in self.bridge.transcript_documents():
+            self.remote_participants[source] = participants
+            self.remote_groupmaker_sessions[source] = session
             old_count = self.remote_entry_counts.get(source, 0)
             if len(entries) < old_count:
                 old_count = 0
@@ -1204,10 +1238,21 @@ class ProcessingWorker(QObject):
             self.log.emit(f"Skipped already-processed transcript chunk from {source} without calling Ollama.")
             return
         session = _load_groupmaker_session_for_sources(source)
+        if not session:
+            session = next((self.remote_groupmaker_sessions.get(consumed_source, {}) for consumed_source in consumed if self.remote_groupmaker_sessions.get(consumed_source)), {})
+            if session:
+                self.log.emit(f"Attached transcript to bridge GROUPMAKER group {session.get('group_id', '')} for memory and reminder processing.")
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
         if not group_people:
+            group_people = list(dict.fromkeys(
+                name
+                for consumed_source in consumed
+                for name in self.remote_participants.get(consumed_source, [])
+                if name
+            ))
+        if not group_people:
             self.db.store_processed_chunk(source, chunk, [])
-            self.log.emit(f"Skipped memory extraction for {source}: no active GROUPMAKER participants to attach memories to.")
+            self.log.emit(f"Skipped memory extraction for {source}: transcript metadata and active GROUPMAKER state contain no participants.")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
             return
         client = OllamaClient(self.settings.get('ollama_url'), self.settings.get('ollama_model'))
