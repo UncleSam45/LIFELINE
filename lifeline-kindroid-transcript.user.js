@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.0.0
+// @version      1.1.0
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -119,10 +119,13 @@
     }
     const appended = captured.slice(overlap);
     const detectedParticipants = [...new Set(bubbles.map((bubble) => normalizeText(bubble.speaker)).filter(Boolean))];
+    const preservedParticipants = Array.isArray(base.participants) ? base.participants.map(normalizeText).filter(Boolean) : [];
     const doc = {
       version: 2,
       group_id: id,
-      participants: Array.isArray(base.participants) && base.participants.length ? base.participants.map(normalizeText).filter(Boolean) : detectedParticipants,
+      // GROUPMAKER is authoritative for membership. DOM speaker detection is only
+      // a fallback for transcript files not initialized by the frontend.
+      participants: preservedParticipants.length ? preservedParticipants : detectedParticipants,
       transcript: prior.concat(appended),
     };
     return { doc, added: appended.length, changed: JSON.stringify(base) !== JSON.stringify(doc) };

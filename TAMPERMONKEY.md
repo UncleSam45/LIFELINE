@@ -2,6 +2,8 @@
 
 `lifeline-kindroid-transcript.user.js` brings the Electron group-call transcript bridge to normal browsers through Tampermonkey.
 
+GROUPMAKER initializes `transcripts/<group-id>/transcript.json` with its participant names when a group is created or updated. The userscript treats that list as authoritative and only detects speaker names from the Kindroid DOM for a legacy or otherwise uninitialized transcript. Captures append transcript text without replacing frontend-provided participants.
+
 ## Install
 
 1. Install Tampermonkey in the browser.
