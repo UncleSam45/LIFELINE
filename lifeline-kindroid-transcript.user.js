@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.0.0
+// @version      1.2.0
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -19,6 +19,7 @@
   const BRIDGE_OWNER = 'unclesam45';
   const BRIDGE_REPO = 'LIFELINE_BRIDGE';
   const BRIDGE_BRANCH = 'main';
+  const BRIDGE_CONFIG_PATH = 'config.json';
   const TOKEN_KEY = 'lifeline.githubFineGrainedToken';
   const CAPTURE_RETRY_MS = 3000;
   const CAPTURE_INTERVAL_MS = 60000;
@@ -96,6 +97,19 @@
     catch (error) { throw new Error(`Could not parse the existing transcript JSON: ${error.message}`); }
   }
 
+  async function readGroupmakerParticipants(token, id) {
+    const response = await request({ method: 'GET', url: contentUrl(BRIDGE_CONFIG_PATH), headers: githubHeaders(token) });
+    if (response.status === 404) return [];
+    const file = parseGithubResponse(response, 'Reading GROUPMAKER participant metadata');
+    let config;
+    try { config = JSON.parse(decodeBase64Utf8(file.content)); }
+    catch (error) { throw new Error(`Could not parse bridge config participant metadata: ${error.message}`); }
+    const sessions = Array.isArray(config?.groupmaker_sessions) ? config.groupmaker_sessions : [];
+    const session = sessions.filter((row) => normalizeText(row?.group_id) === id)
+      .sort((left, right) => normalizeText(right?.touched_at).localeCompare(normalizeText(left?.touched_at)))[0];
+    return [...new Set((Array.isArray(session?.names) ? session.names : []).map(normalizeText).filter(Boolean))];
+  }
+
   async function writeTranscript(token, repoPath, doc, sha) {
     const response = await request({
       method: 'PUT', url: contentUrl(repoPath, false), headers: { ...githubHeaders(token), 'Content-Type': 'application/json' },
@@ -109,7 +123,7 @@
     return (Array.isArray(doc?.entries) ? doc.entries : []).map((entry) => normalizeText(entry?.text)).filter((text) => text && !isPageNoise(text));
   }
 
-  function mergeTranscript(existing, id, bubbles) {
+  function mergeTranscript(existing, id, bubbles, authoritativeParticipants = []) {
     const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
     const prior = transcriptEntries(base);
     const captured = bubbles.map((bubble) => normalizeText(bubble.text)).filter((text) => text && !isPageNoise(text));
@@ -119,10 +133,14 @@
     }
     const appended = captured.slice(overlap);
     const detectedParticipants = [...new Set(bubbles.map((bubble) => normalizeText(bubble.speaker)).filter(Boolean))];
+    const preservedParticipants = Array.isArray(base.participants) ? base.participants.map(normalizeText).filter(Boolean) : [];
+    const configuredParticipants = authoritativeParticipants.map(normalizeText).filter(Boolean);
     const doc = {
       version: 2,
       group_id: id,
-      participants: Array.isArray(base.participants) && base.participants.length ? base.participants.map(normalizeText).filter(Boolean) : detectedParticipants,
+      // GROUPMAKER is authoritative for membership. DOM speaker detection is only
+      // a fallback for transcript files not initialized by the frontend.
+      participants: configuredParticipants.length ? [...new Set(configuredParticipants)] : (preservedParticipants.length ? preservedParticipants : detectedParticipants),
       transcript: prior.concat(appended),
     };
     return { doc, added: appended.length, changed: JSON.stringify(base) !== JSON.stringify(doc) };
@@ -131,13 +149,15 @@
   async function saveMerged(token, id, bubbles) {
     const repoPath = `transcripts/${id}/transcript.json`;
     let current = await readTranscript(token, repoPath);
-    let merged = mergeTranscript(current.doc, id, bubbles);
+    const currentParticipants = Array.isArray(current.doc?.participants) ? current.doc.participants.map(normalizeText).filter(Boolean) : [];
+    const configuredParticipants = currentParticipants.length ? [] : await readGroupmakerParticipants(token, id);
+    let merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
     if (!merged.changed) return { ...merged, repoPath };
     try { await writeTranscript(token, repoPath, merged.doc, current.sha); }
     catch (error) {
       if (error.status !== 409) throw error;
       current = await readTranscript(token, repoPath);
-      merged = mergeTranscript(current.doc, id, bubbles);
+      merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
       if (merged.changed) await writeTranscript(token, repoPath, merged.doc, current.sha);
     }
     return { ...merged, repoPath };
