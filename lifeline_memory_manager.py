@@ -76,6 +76,7 @@ APP_ROOT = Path(__file__).resolve().parent
 APP_DATA_DIR = _default_documents_dir() / "KINDROIDXL" / "kindroidxl_data"
 DEFAULT_BACKUP_ROOT = _default_documents_dir() / "KINDROIDXL-backups"
 DB_PATH = APP_DATA_DIR / "lifeline_memory.db"
+BRIDGE_TOKEN_PATH = APP_DATA_DIR / ".lifeline_bridge_token"
 LEGACY_DB_PATH = Path(__file__).with_name("lifeline_memory.db")
 RUNTIME_DB_PATH = DB_PATH
 RUNTIME_BACKUP_ROOT = DEFAULT_BACKUP_ROOT
@@ -98,6 +99,30 @@ def _bridge_token() -> str:
         if value:
             return value
     return ""
+
+
+def _saved_bridge_token() -> str:
+    """Read the local token without placing it in the mirrored memory database."""
+    try:
+        return BRIDGE_TOKEN_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _save_bridge_token(token: str) -> None:
+    """Persist the bridge token locally for the next manager launch."""
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        BRIDGE_TOKEN_PATH.unlink(missing_ok=True)
+        return
+    BRIDGE_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = BRIDGE_TOKEN_PATH.with_suffix(".tmp")
+    temporary_path.write_text(clean_token, encoding="utf-8")
+    try:
+        temporary_path.chmod(0o600)
+    except OSError:
+        pass
+    temporary_path.replace(BRIDGE_TOKEN_PATH)
 
 
 class GitHubBridge:
@@ -157,9 +182,9 @@ class GitHubBridge:
         )
         response.raise_for_status()
 
-    def transcript_documents(self) -> List[Tuple[str, List[str], List[str]]]:
-        """Return bridge transcript paths, entries, and authoritative participants."""
-        documents: List[Tuple[str, List[str], List[str]]] = []
+    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str]]:
+        """Return bridge transcript paths, entries, participants, and group IDs."""
+        documents: List[Tuple[str, List[str], List[str], str]] = []
         config_data, _config_sha = self.read_bytes("config.json")
         try:
             config = json.loads(config_data.decode("utf-8")) if config_data else {}
@@ -188,12 +213,12 @@ class GitHubBridge:
                 payload = json.loads(data.decode("utf-8"))
                 raw_entries = payload.get("transcript", []) if isinstance(payload, dict) else []
                 entries = [str(entry).strip() for entry in raw_entries if str(entry).strip()]
+                group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
                 if not participants:
-                    group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
                     participants = participants_by_group.get(group_id, [])
-                documents.append((str(item.get("path")), entries, participants))
+                documents.append((str(item.get("path")), entries, participants, group_id))
         return documents
 
 GENERIC_KEYWORDS = {
@@ -1172,6 +1197,7 @@ class ProcessingWorker(QObject):
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
         self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
         self.remote_participants: Dict[str, List[str]] = {}
+        self.remote_group_ids: Dict[str, str] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
         self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
@@ -1206,8 +1232,9 @@ class ProcessingWorker(QObject):
         self.stop()
 
     def poll_github_transcripts(self) -> None:
-        for source, entries, participants in self.bridge.transcript_documents():
+        for source, entries, participants, group_id in self.bridge.transcript_documents():
             self.remote_participants[source] = participants
+            self.remote_group_ids[source] = group_id
             old_count = self.remote_entry_counts.get(source, 0)
             if len(entries) < old_count:
                 old_count = 0
@@ -1226,6 +1253,20 @@ class ProcessingWorker(QObject):
             self.log.emit(f"Skipped already-processed transcript chunk from {source} without calling Ollama.")
             return
         session = _load_groupmaker_session_for_sources(source)
+        # The transcript document is authoritative for its own group.  The
+        # standalone manager may not have the local GROUPMAKER state file, and
+        # the state fallback may point at a different recently touched group.
+        transcript_source = next(
+            (item for item in consumed if self.remote_group_ids.get(item)),
+            "",
+        )
+        transcript_group_id = self.remote_group_ids.get(transcript_source, "")
+        if transcript_group_id and str(session.get("group_id", "")).strip() != transcript_group_id:
+            session = {
+                "group_id": transcript_group_id,
+                "names": self.remote_participants.get(transcript_source, []),
+                "ai_list": [],
+            }
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
         if not group_people:
             group_people = list(dict.fromkeys(
@@ -1660,10 +1701,11 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
-        self.github_token.setText(_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        self.github_token.setText(_bridge_token() or _saved_bridge_token()); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
         self.chunk.setValue(self.settings.int('chunk_size')); self.min_idle.setValue(self.settings.int('minimum_idle_chunk_size')); self.max_chunk.setValue(self.settings.int('maximum_chunk_size')); self.idle.setValue(self.settings.int('idle_timeout')); self.conf.setValue(self.settings.float('confidence_threshold'))
 
     def save_settings(self) -> None:
+        _save_bridge_token(self.github_token.text())
         for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
