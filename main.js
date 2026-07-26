@@ -653,8 +653,46 @@ async function githubRequest(url, options = {}) {
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(payload.message || `GitHub request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.message || `GitHub request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
+}
+
+async function ensureGroupTranscript(groupId, participants, retryOnConflict = true) {
+  const id = String(groupId || '').trim();
+  const names = [...new Set((Array.isArray(participants) ? participants : []).map((name) => String(name || '').trim()).filter(Boolean))];
+  if (!id || !names.length) return;
+  const path = `transcripts/${id}/transcript.json`;
+  let sha = '';
+  let current = null;
+  try {
+    const file = await githubRequest(bridgeUrl(path));
+    sha = String(file.sha || '');
+    current = decodeBase64(file.content || '');
+  } catch (error) {
+    if (!/not found/i.test(String(error?.message || ''))) throw error;
+  }
+  const base = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+  const transcript = Array.isArray(base.transcript) ? base.transcript : [];
+  const doc = { ...base, version: 2, group_id: id, participants: names, transcript };
+  if (JSON.stringify(base) === JSON.stringify(doc)) return;
+  try {
+    await githubRequest(bridgeUrl(path, false), {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: `Initialize group transcript ${id} participants via LIFELINE frontend`,
+        branch: BRIDGE_BRANCH,
+        content: encodeBase64(doc),
+        ...(sha ? { sha } : {}),
+      }),
+    });
+  } catch (error) {
+    if (!retryOnConflict || !isGithubShaMismatch(error)) throw error;
+    await ensureGroupTranscript(id, names, false);
+  }
 }
 
 async function readGithubContentFile(path) {
@@ -672,7 +710,7 @@ async function readGithubContentFile(path) {
 
 function isGithubShaMismatch(error) {
   const message = String(error?.message || '');
-  return /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
+  return Number(error?.status) === 409 || /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
 }
 
 async function refreshBridgeSha() {
@@ -1255,7 +1293,10 @@ async function syncGroupmaker() {
       state.groupmakerStatus = !configurationChanged && !automationChanged
         ? (opened ? 'Call opened.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`)
         : `Updated active session (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
-      if (!configurationChanged && !automationChanged) return;
+      if (!configurationChanged && !automationChanged) {
+        await ensureGroupTranscript(target.group_id, sessionNames);
+        return;
+      }
     } else {
       const groupId = extractGroupId(result.groupIdSource || result.detail);
       if (!groupId) throw new Error('Create succeeded, but no group_id could be parsed from the response.');
@@ -1268,6 +1309,7 @@ async function syncGroupmaker() {
     }
     persistGroupmakerDraft();
     await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`);
+    await ensureGroupTranscript(target.group_id, target.names);
   } catch (error) {
     if (preparedTab && !preparedTab.closed) preparedTab.close();
     state.groupmakerStatus = error.message;
