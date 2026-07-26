@@ -653,8 +653,46 @@ async function githubRequest(url, options = {}) {
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(payload.message || `GitHub request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(payload.message || `GitHub request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
+}
+
+async function ensureGroupTranscript(groupId, participants, retryOnConflict = true) {
+  const id = String(groupId || '').trim();
+  const names = [...new Set((Array.isArray(participants) ? participants : []).map((name) => String(name || '').trim()).filter(Boolean))];
+  if (!id || !names.length) return;
+  const path = `transcripts/${id}/transcript.json`;
+  let sha = '';
+  let current = null;
+  try {
+    const file = await githubRequest(bridgeUrl(path));
+    sha = String(file.sha || '');
+    current = decodeBase64(file.content || '');
+  } catch (error) {
+    if (!/not found/i.test(String(error?.message || ''))) throw error;
+  }
+  const base = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+  const transcript = Array.isArray(base.transcript) ? base.transcript : [];
+  const doc = { ...base, version: 2, group_id: id, participants: names, transcript };
+  if (JSON.stringify(base) === JSON.stringify(doc)) return;
+  try {
+    await githubRequest(bridgeUrl(path, false), {
+      method: 'PUT',
+      body: JSON.stringify({
+        message: `Initialize group transcript ${id} participants via LIFELINE frontend`,
+        branch: BRIDGE_BRANCH,
+        content: encodeBase64(doc),
+        ...(sha ? { sha } : {}),
+      }),
+    });
+  } catch (error) {
+    if (!retryOnConflict || !isGithubShaMismatch(error)) throw error;
+    await ensureGroupTranscript(id, names, false);
+  }
 }
 
 async function readGithubContentFile(path) {
@@ -672,7 +710,7 @@ async function readGithubContentFile(path) {
 
 function isGithubShaMismatch(error) {
   const message = String(error?.message || '');
-  return /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
+  return Number(error?.status) === 409 || /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
 }
 
 async function refreshBridgeSha() {
@@ -778,7 +816,7 @@ async function loadBridge() {
   render();
 }
 
-async function saveBridge(reason = 'Update directory') {
+async function saveBridge(reason = 'Update directory', throwOnError = false) {
   state.saving = true; state.syncState = 'Saving'; state.syncDetail = 'Writing directory changes to GitHub…'; render();
   try {
     const { retried } = await writeBridgeConfig(reason);
@@ -788,6 +826,7 @@ async function saveBridge(reason = 'Update directory') {
       : `Saved ${entries().length} entries to ${BRIDGE_PATH}.`;
   } catch (error) {
     state.syncState = 'Save failed'; state.syncDetail = error.message;
+    if (throwOnError) throw error;
   } finally {
     state.saving = false; render();
   }
@@ -1247,27 +1286,31 @@ async function syncGroupmaker() {
     const now = new Date().toISOString();
     const sessionDate = localCalendarDate();
     let target = active;
+    let automation = null;
+    let automationChanged = false;
     if (active) {
-      const automation = await runGroupmakerPresenceAutomations({ people, groupId: target.group_id, active: priorActive, aiList });
-      const automationChanged = automation.groupSent || automation.directSent || automation.scenesUpdated || automation.errors.length;
+      automation = await runGroupmakerPresenceAutomations({ people, groupId: target.group_id, active: priorActive, aiList });
+      automationChanged = Boolean(automation.groupSent || automation.directSent || automation.scenesUpdated || automation.errors.length);
       if (configurationChanged || automationChanged) Object.assign(target, { ai_list: aiList, names: sessionNames, group_name: groupName, session_date: sessionDate, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, current_scene: activity, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, touched_at: now, last_automation: { ...automation, ran_at: now } });
-      const opened = openPreparedGroupmakerTab(preparedTab, target.group_id);
-      state.groupmakerStatus = !configurationChanged && !automationChanged
-        ? (opened ? 'Call opened.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`)
-        : `Updated active session (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`}`;
-      if (!configurationChanged && !automationChanged) return;
     } else {
       const groupId = extractGroupId(result.groupIdSource || result.detail);
       if (!groupId) throw new Error('Create succeeded, but no group_id could be parsed from the response.');
-      const automation = await runGroupmakerPresenceAutomations({ people, groupId, active: null, aiList });
+      automation = await runGroupmakerPresenceAutomations({ people, groupId, active: null, aiList });
       target = { session_key: groupId, group_id: groupId, ai_list: aiList, names: sessionNames, group_name: groupName, session_date: sessionDate, group_context: context, group_directive: PHONE_CALL_DIRECTIVE, current_scene: activity, physical_location: groupmakerPhysicalLocation(), share_short_term_memory: true, use_manual_turntaking: true, created_at: now, touched_at: now, closed_at: '', idle_at: '', last_automation: { ...automation, ran_at: now } };
       state.config.groupmaker_sessions = groupmakerSessions().filter((row) => row.group_id !== groupId).concat(target);
       state.config.groupmaker_active_session_key = groupId;
-      const opened = openPreparedGroupmakerTab(preparedTab, groupId);
-      state.groupmakerStatus = `Created active session ${groupId} (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${opened ? 'Opened Kindroid call tab.' : `Open manually: ${kindroidGroupCallUrl(groupId)}`}`;
     }
+    target.names = [...sessionNames];
     persistGroupmakerDraft();
-    await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`);
+    state.groupmakerStatus = `Preparing transcript metadata for ${sessionNames.join(', ')} before opening the call…`;
+    render();
+    await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`, true);
+    await ensureGroupTranscript(target.group_id, sessionNames);
+    const opened = openPreparedGroupmakerTab(preparedTab, target.group_id);
+    const callStatus = opened ? 'Opened Kindroid call tab after preparing its transcript.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`;
+    state.groupmakerStatus = active && !configurationChanged && !automationChanged
+      ? callStatus
+      : `${active ? 'Updated active session' : `Created active session ${target.group_id}`} (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${callStatus}`;
   } catch (error) {
     if (preparedTab && !preparedTab.closed) preparedTab.close();
     state.groupmakerStatus = error.message;
