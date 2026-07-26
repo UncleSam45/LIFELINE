@@ -104,7 +104,7 @@ const state = {
   syncDetail: REMEMBERED_GITHUB_LOGIN_ENABLED
     ? 'Remembered access key found; connecting automatically…'
     : 'Enter your access key.',
-  config: { directory_entries: [] },
+  config: { directory_entries: [], journal_entries: [] },
   bridgeSha: '',
   selectedUid: '',
   activeView: 'world',
@@ -157,6 +157,53 @@ function entries() {
   return state.config.directory_entries;
 }
 
+
+function journalEntries() {
+  if (!Array.isArray(state.config.journal_entries)) state.config.journal_entries = [];
+  state.config.journal_entries = state.config.journal_entries.filter((entry) => entry && typeof entry === 'object').map(ensureJournalEntry);
+  return state.config.journal_entries;
+}
+
+function newJournalId() {
+  return `journal_${Date.now()}_${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+function normalizeJournalKeyphrases(value) {
+  const values = Array.isArray(value) ? value : String(value || '').split(/[\n,]+/);
+  return [...new Set(values.map((phrase) => String(phrase).trim()).filter(Boolean))].slice(0, 8);
+}
+
+function ensureJournalEntry(record = {}) {
+  const now = new Date().toISOString();
+  const validStatuses = ['draft', 'submitting', 'synced', 'failed', 'unknown'];
+  const normalized = {
+    ...record,
+    id: String(record.id || newJournalId()), directory_uid: String(record.directory_uid || ''),
+    ai_id: String(record.ai_id || ''), person_name: String(record.person_name || 'Unknown person'),
+    entry: String(record.entry || ''), keyphrases: normalizeJournalKeyphrases(record.keyphrases),
+    created_at: String(record.created_at || now), updated_at: String(record.updated_at || record.created_at || now),
+    remote_status: validStatuses.includes(record.remote_status) ? record.remote_status : 'draft',
+    remote_http_status: Number(record.remote_http_status || 0), remote_created_at: String(record.remote_created_at || ''),
+    attempt_count: Math.max(0, Number(record.attempt_count || 0)), archived: Boolean(record.archived),
+  };
+  Object.assign(record, normalized);
+  return record;
+}
+
+function journalsForPerson(person) {
+  return journalEntries().filter((journal) => journal.directory_uid === person?.directory_uid).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+}
+
+function validateJournalDraft({ ai_id, entry, keyphrases }, { requireKey = false } = {}) {
+  const errors = [];
+  if (!String(ai_id || '').trim()) errors.push('This person needs an AI ID.');
+  if (!String(entry || '').trim()) errors.push('Journal entry is required.');
+  const normalized = normalizeJournalKeyphrases(keyphrases);
+  if (!normalized.length) errors.push('At least one keyphrase is required.');
+  if ((Array.isArray(keyphrases) ? keyphrases : String(keyphrases || '').split(/[\n,]+/)).map(String).filter((x) => x.trim()).length > 8) errors.push('A maximum of 8 keyphrases is allowed.');
+  if (requireKey && !getKindroidCredential().startsWith('kn_')) errors.push('A valid Kindroid API key starting with kn_ is required.');
+  return { ok: !errors.length, errors, keyphrases: normalized };
+}
 
 function groupmakerSessions() {
   if (!Array.isArray(state.config.groupmaker_sessions)) state.config.groupmaker_sessions = [];
@@ -349,7 +396,7 @@ const EXPERIMENTAL_KINDROID_API_REGISTRY = Object.freeze({
   groupchat_ai_response_legacy: op('groupchat_ai_response_legacy','Groupchat AI Response Legacy','legacy_routes','legacy_alias','POST','/groupchat-ai-response',[kField('group_id','Group ID','group_selector',{required:true}),kField('ai_id','AI ID','ai_selector',{required:true}),kField('stream','Stream','boolean'),kField('request_id','Request ID','text',{support:'experimental',officiallySupported:false})],{aliases:['/groupchats-ai-response'],supportsStreaming:true,sourceNotes:[legacySource('request_id remains experimental.')] }),
   request_selfie: op('request_selfie','Request Selfie','media_selfies','experimental_unverified','POST','/request-selfie',['ai_id','prompt','aspect','uses_nsfw'].map(x=>kField(x,x,x==='uses_nsfw'?'boolean':(x==='prompt'?'textarea':'text'),{support:'experimental',officiallySupported:false,sensitive:x==='prompt'})),{sourceNotes:[legacySource()]}),
   request_group_selfie: op('request_group_selfie','Request Group Selfie','media_selfies','experimental_unverified','POST','/request-group-selfie',['version','ai_ids','prompt','regional_prompts','aspect','uses_nsfw','seed'].map(x=>kField(x,x,x==='ai_ids'?'csv':(x==='regional_prompts'?'json':(x==='uses_nsfw'?'boolean':(x==='prompt'?'textarea':'text'))),{support:'experimental',officiallySupported:false,sensitive:/prompt/.test(x)})),{sourceNotes:[legacySource()]}),
-  create_journal_entry: op('create_journal_entry','Create Journal Entry','memory_journals','experimental_unverified','POST','/create-journal-entry',[kField('ai_id','AI ID','ai_selector',{required:true}),kField('entry','Entry','textarea',{required:true,support:'experimental',officiallySupported:false,sensitive:true}),kField('keyphrases','Keyphrases','csv',{support:'experimental',officiallySupported:false})],{sourceNotes:[legacySource('Retained from Memory Cleaner/Feeder remote journal jobs.')] }),
+  create_journal_entry: op('create_journal_entry','Create Journal Entry','memory_journals','experimental_verified','POST','/journal-create',[kField('ai_id','AI ID','ai_selector',{required:true}),kField('entry','Entry','textarea',{required:true,support:'experimental',officiallySupported:false,sensitive:true}),kField('keyphrases','Keyphrases','csv',{required:true,support:'experimental',officiallySupported:false})],{sourceNotes:[legacySource('Retained from Memory Cleaner/Feeder remote journal jobs.')] }),
   suggest_user_message: op('suggest_user_message','Suggest User Message','experimental','experimental_unverified','POST','/suggest-user-message',[kField('ai_id','AI ID','ai_selector',{required:true}),kField('existing_message','Existing Message','textarea',{sensitive:true})],{sourceNotes:[legacySource()]}),
   suggest_user_group_message: op('suggest_user_group_message','Suggest User Group Message','experimental','experimental_unverified','POST','/suggest-user-group-message',[kField('group_id','Group ID','group_selector',{required:true}),kField('existing_message','Existing Message','textarea',{sensitive:true})],{sourceNotes:[legacySource()]}),
   check_subscription: op('check_subscription','Check Subscription','account','experimental_unverified','POST','/check-subscription',[],{sourceNotes:[legacySource('Never run automatically at login.')]})
@@ -649,7 +696,12 @@ async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
     return { payload, retried: false };
   } catch (error) {
     if (!retryOnShaMismatch || !isGithubShaMismatch(error)) throw error;
-    await refreshBridgeSha();
+    const localJournals = journalEntries().map((journal) => ({ ...journal }));
+    const latest = await readGithubContentFile(BRIDGE_PATH);
+    state.bridgeSha = latest.sha;
+    const merged = new Map((latest.config.journal_entries || []).map((journal) => { const normalized = ensureJournalEntry({ ...journal }); return [normalized.id, normalized]; }));
+    localJournals.forEach((journal) => { const remote = merged.get(journal.id); if (!remote || String(journal.updated_at) >= String(remote.updated_at)) merged.set(journal.id, journal); });
+    state.config = { ...latest.config, ...state.config, journal_entries: [...merged.values()] };
     const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
       method: 'PUT',
       body: JSON.stringify({
@@ -677,8 +729,8 @@ function encodeBase64(payload) {
 }
 
 function normalizeImported(payload) {
-  if (Array.isArray(payload)) return { directory_entries: payload };
-  if (payload && typeof payload === 'object') return { ...payload, directory_entries: Array.isArray(payload.directory_entries) ? payload.directory_entries : [] };
+  if (Array.isArray(payload)) return { directory_entries: payload, journal_entries: [] };
+  if (payload && typeof payload === 'object') return { ...payload, directory_entries: Array.isArray(payload.directory_entries) ? payload.directory_entries : [], journal_entries: Array.isArray(payload.journal_entries) ? payload.journal_entries : [] };
   throw new Error('Imported file must be a legacy config object or directory_entries array.');
 }
 
@@ -704,6 +756,7 @@ async function loadBridge() {
     state.bridgeSha = bestCandidate.path === BRIDGE_PATH ? bestCandidate.sha : '';
     state.config = bestCandidate.config;
     entries().forEach(ensureEntry);
+    journalEntries();
     hydrateGroupmakerDraft();
     const dailyRollover = closeExpiredGroupmakerSessions();
     state.authenticated = true;
@@ -716,7 +769,7 @@ async function loadBridge() {
     state.authenticated = false;
     state.syncState = 'Denied'; state.syncDetail = lastError.message;
   } else {
-    state.config = { directory_entries: [] };
+    state.config = { directory_entries: [], journal_entries: [] };
     hydrateGroupmakerDraft();
     state.bridgeSha = '';
     state.authenticated = true;
@@ -807,6 +860,63 @@ function completionScore(entry) {
   return Math.round((filled / tracked.length) * 100);
 }
 
+function journalRecordFromComposer(person, status = 'draft') {
+  const entry = document.querySelector('#journal-entry')?.value || '';
+  const rawKeyphrases = document.querySelector('#journal-keyphrases')?.value || '';
+  const validation = validateJournalDraft({ ai_id: person.ai_id, entry, keyphrases: rawKeyphrases }, { requireKey: status !== 'draft' });
+  if (!validation.ok) return { validation };
+  const now = new Date().toISOString();
+  return { validation, record: ensureJournalEntry({ id: newJournalId(), directory_uid: person.directory_uid, ai_id: person.ai_id, person_name: person.name || 'Unknown person', entry: entry.trim(), keyphrases: validation.keyphrases, created_at: now, updated_at: now, remote_status: status, remote_http_status: 0, remote_created_at: '', attempt_count: status === 'draft' ? 0 : 1, archived: false }) };
+}
+
+function classifyJournalResult(result) {
+  if (result?.ok && result.status >= 200 && result.status < 300) return 'synced';
+  if (['network', 'timeout', 'cancelled', 'server', 'unknown', 'parse'].includes(result?.category) || !result?.status || result.status >= 500) return 'unknown';
+  return 'failed';
+}
+
+async function submitJournalRecord(record) {
+  record.remote_status = 'submitting'; record.updated_at = new Date().toISOString();
+  await saveBridge('Save journal before Kindroid submission');
+  const result = await executeKindroidOperation('create_journal_entry', { ai_id: record.ai_id, entry: record.entry, keyphrases: record.keyphrases });
+  record.remote_status = classifyJournalResult(result);
+  record.remote_http_status = Number(result?.status || 0);
+  record.remote_created_at = record.remote_status === 'synced' ? String(result?.data?.created_at || result?.completedAt || new Date().toISOString()) : '';
+  record.updated_at = new Date().toISOString();
+  await saveBridge('Update Kindroid journal result');
+}
+
+async function saveJournalDraft(person) {
+  const { record, validation } = journalRecordFromComposer(person, 'draft');
+  if (!record) { alert(validation.errors.join('\n')); return; }
+  journalEntries().push(record);
+  await saveBridge('Save local journal draft');
+}
+
+async function createKindroidJournal(person) {
+  const { record, validation } = journalRecordFromComposer(person, 'submitting');
+  if (!record) { alert(validation.errors.join('\n')); return; }
+  journalEntries().push(record);
+  await submitJournalRecord(record);
+}
+
+async function retryJournal(id) {
+  const record = journalEntries().find((journal) => journal.id === id);
+  if (!record || !['draft', 'failed', 'unknown'].includes(record.remote_status)) return;
+  const validation = validateJournalDraft(record, { requireKey: true });
+  if (!validation.ok) { alert(validation.errors.join('\n')); return; }
+  if (record.remote_status === 'unknown' && !confirm('Kindroid may already have created this journal. Retrying could create a duplicate. Retry anyway?')) return;
+  record.attempt_count += 1;
+  await submitJournalRecord(record);
+}
+
+function renderJournalSection(person) {
+  const journals = journalsForPerson(person);
+  const connected = getKindroidCredential().startsWith('kn_');
+  const cards = journals.map((journal) => `<article class="journal-history-card ${journal.archived ? 'archived' : ''}"><div class="journal-card-head"><span class="journal-status status-${escapeHtml(journal.remote_status)}">${escapeHtml(journal.remote_status)}</span><time>${escapeHtml(new Date(journal.created_at).toLocaleString())}</time></div><p>${escapeHtml(journal.entry)}</p><div class="keyphrase-chips">${journal.keyphrases.map((phrase) => `<span>${escapeHtml(phrase)}</span>`).join('')}</div><small>Attempts: ${journal.attempt_count} · HTTP: ${journal.remote_http_status || '—'}</small><div class="journal-actions"><button type="button" class="ghost journal-copy" data-journal-id="${escapeHtml(journal.id)}">COPY</button>${['draft','failed','unknown'].includes(journal.remote_status) ? `<button type="button" class="journal-retry" data-journal-id="${escapeHtml(journal.id)}">RETRY</button>` : ''}<button type="button" class="ghost journal-archive" data-journal-id="${escapeHtml(journal.id)}">${journal.archived ? 'RESTORE' : 'ARCHIVE LOCALLY'}</button></div></article>`).join('');
+  return `<section class="journal-section tab-panel ${state.activeEntryTab === 'journal' ? 'active' : ''}"><header><p class="eyebrow">JOURNAL</p><h3>${escapeHtml(person.name || 'Unknown person')}</h3><p class="sync-note">AI ID: ${escapeHtml(person.ai_id || 'Missing')} · Kindroid: <b>${connected ? 'Connected' : 'Not connected'}</b></p></header><section class="journal-composer"><label><span>JOURNAL ENTRY</span><textarea id="journal-entry" placeholder="Write a durable memory…"></textarea></label><label><span>KEYPHRASES</span><textarea id="journal-keyphrases" placeholder="Comma or new-line separated"></textarea><small><b id="journal-keyphrase-count">0</b> / 8 keyphrases</small></label><div class="journal-actions"><button id="journal-save-draft" type="button">SAVE DRAFT</button><button id="journal-create-remote" type="button">CREATE IN KINDROID</button><button id="journal-clear" class="ghost" type="button">CLEAR</button></div></section><div class="journal-history"><h4>Saved journals</h4>${cards || '<div class="empty small">No journals saved for this person yet.</div>'}</div></section>`;
+}
+
 function renderMemorySection(person) {
   const aiId = String(person?.ai_id || '').trim();
   const relatedSessions = groupmakerSessions().filter((session) => Array.isArray(session.ai_list) && session.ai_list.map(String).includes(aiId));
@@ -830,7 +940,7 @@ function endGithubSession(detail) {
   state.rememberKey = false;
   state.authenticated = false;
   state.bridgeSha = '';
-  state.config = { directory_entries: [] };
+  state.config = { directory_entries: [], journal_entries: [] };
   state.selectedUid = '';
   state.settingsOpen = false;
   state.syncState = 'Locked';
@@ -862,7 +972,7 @@ function renderWorldView() {
 
 function renderDirectoryWorkspace(current, onlineLabel) {
   if (!current) return '<div class="empty">Add a person or import a legacy config to begin.</div>';
-  return `<div class="hero-line"><div><h1>${escapeHtml(current.name || 'No person selected')}</h1><div class="hero-meta"><span>${escapeHtml(onlineLabel)}</span><span>${escapeHtml(current.location || 'No location')}</span></div></div><button id="save" title="Save and sync" ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save'}</button></div><div class="entry-tabs" role="tablist"><button class="tab ${state.activeEntryTab === 'profile' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'profile'}" data-tab="profile">PROFILE</button><button class="tab ${state.activeEntryTab === 'family' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'family'}" data-tab="family">FAMILY</button><button class="tab ${state.activeEntryTab === 'memory' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'memory'}" data-tab="memory">MEMORY</button></div><div class="tab-stage"><section class="profile-panel tab-panel ${state.activeEntryTab === 'profile' ? 'active' : ''}"><div class="status-grid"><button id="toggle-online" class="status ${current.online ? 'on' : ''}"><span>${current.online ? 'ONLINE' : 'OFFLINE'}</span><small>${current.online ? 'Ready for routing' : 'Hidden from live flow'}</small></button><div class="asset-card accent"><b>${escapeHtml(current.location || '—')}</b><span>LOCATION</span></div><div class="asset-card accent"><b>${escapeHtml(current.activity || '—')}</b><span>ACTIVITY / CURRENT SCENE</span></div></div><form id="entry-form" class="field-grid">${DIRECTORY_FIELDS.map(([key, label, kind]) => fieldMarkup(current, key, label, kind)).join('')}</form></section>${renderGenerationsSection(current)}${renderMemorySection(current)}</div>`;
+  return `<div class="hero-line"><div><h1>${escapeHtml(current.name || 'No person selected')}</h1><div class="hero-meta"><span>${escapeHtml(onlineLabel)}</span><span>${escapeHtml(current.location || 'No location')}</span></div></div><button id="save" title="Save and sync" ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save'}</button></div><div class="entry-tabs" role="tablist"><button class="tab ${state.activeEntryTab === 'profile' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'profile'}" data-tab="profile">PROFILE</button><button class="tab ${state.activeEntryTab === 'family' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'family'}" data-tab="family">FAMILY</button><button class="tab ${state.activeEntryTab === 'memory' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'memory'}" data-tab="memory">MEMORY</button><button class="tab ${state.activeEntryTab === 'journal' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'journal'}" data-tab="journal">JOURNAL</button></div><div class="tab-stage"><section class="profile-panel tab-panel ${state.activeEntryTab === 'profile' ? 'active' : ''}"><div class="status-grid"><button id="toggle-online" class="status ${current.online ? 'on' : ''}"><span>${current.online ? 'ONLINE' : 'OFFLINE'}</span><small>${current.online ? 'Ready for routing' : 'Hidden from live flow'}</small></button><div class="asset-card accent"><b>${escapeHtml(current.location || '—')}</b><span>LOCATION</span></div><div class="asset-card accent"><b>${escapeHtml(current.activity || '—')}</b><span>ACTIVITY / CURRENT SCENE</span></div></div><form id="entry-form" class="field-grid">${DIRECTORY_FIELDS.map(([key, label, kind]) => fieldMarkup(current, key, label, kind)).join('')}</form></section>${renderGenerationsSection(current)}${renderMemorySection(current)}${renderJournalSection(current)}</div>`;
 }
 
 function renderDirectory() {
@@ -1251,6 +1361,14 @@ function bindDirectoryEvents() {
   ['names', 'location', 'activity', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names') refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); }); });
   const current = selectedEntry();
   if (!current) return;
+  const updateKeyphraseCount = () => { const count = normalizeJournalKeyphrases(document.querySelector('#journal-keyphrases')?.value || '').length; const output = document.querySelector('#journal-keyphrase-count'); if (output) output.textContent = String(count); };
+  document.querySelector('#journal-keyphrases')?.addEventListener('input', updateKeyphraseCount);
+  document.querySelector('#journal-clear')?.addEventListener('click', () => { document.querySelector('#journal-entry').value = ''; document.querySelector('#journal-keyphrases').value = ''; updateKeyphraseCount(); });
+  document.querySelector('#journal-save-draft')?.addEventListener('click', () => saveJournalDraft(current));
+  document.querySelector('#journal-create-remote')?.addEventListener('click', () => createKindroidJournal(current));
+  document.querySelectorAll('.journal-copy').forEach((button) => button.addEventListener('click', () => { const record = journalEntries().find((row) => row.id === button.dataset.journalId); if (record) navigator.clipboard?.writeText(record.entry); }));
+  document.querySelectorAll('.journal-retry').forEach((button) => button.addEventListener('click', () => retryJournal(button.dataset.journalId)));
+  document.querySelectorAll('.journal-archive').forEach((button) => button.addEventListener('click', () => { const record = journalEntries().find((row) => row.id === button.dataset.journalId); if (record) { record.archived = !record.archived; record.updated_at = new Date().toISOString(); saveBridge(record.archived ? 'Archive journal locally' : 'Restore local journal'); } }));
   document.querySelector('#toggle-online')?.addEventListener('click', () => { current.online = !current.online; saveBridge('Update online status'); });
   document.querySelectorAll('[data-field]').forEach((input) => input.addEventListener('input', (e) => { current[e.target.dataset.field] = e.target.value; }));
   const generation = ensureGenerationPerson(current);
@@ -1271,6 +1389,7 @@ async function importLegacyFile(event) {
   try {
     state.config = normalizeImported(JSON.parse(await file.text()));
     entries().forEach(ensureEntry);
+    journalEntries();
     hydrateGroupmakerDraft();
     state.selectedUid = entries()[0]?.directory_uid || '';
     await saveBridge('Import legacy directory');
