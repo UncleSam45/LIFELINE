@@ -816,7 +816,27 @@ function renderMemorySection(person) {
 
 function renderSettingsPanel() {
   if (!state.settingsOpen) return '';
-  return `<section class="settings-panel"><div><p class="eyebrow">SETTINGS</p><h3>Bridge settings</h3><p class="sync-note">Import a config.json file from one dedicated settings area.</p></div><button id="import" class="ghost" type="button">Import config.json</button><input id="file" type="file" accept="application/json,.json" hidden /></section>`;
+  return `<section class="settings-panel"><div><p class="eyebrow">SETTINGS</p><h3>Bridge settings</h3><p class="sync-note">Import a config.json file from one dedicated settings area.</p></div><button id="import" class="ghost" type="button">Import config.json</button><input id="file" type="file" accept="application/json,.json" hidden /><div class="github-session"><div><b>GitHub token</b><small>${state.rememberKey ? 'Saved on this device' : 'Used for this session only'}</small></div><div class="github-session-actions"><button id="change-github-token" class="ghost" type="button">Change token</button><button id="logout-github" class="danger" type="button">Log out</button></div></div></section>`;
+}
+
+function endGithubSession(detail) {
+  if (groupmakerDraftSaveTimer) {
+    clearTimeout(groupmakerDraftSaveTimer);
+    groupmakerDraftSaveTimer = null;
+  }
+  localStorage.removeItem(TOKEN_STORAGE_KEY);
+  localStorage.removeItem(REMEMBER_STORAGE_KEY);
+  state.accessKey = '';
+  state.rememberKey = false;
+  state.authenticated = false;
+  state.bridgeSha = '';
+  state.config = { directory_entries: [] };
+  state.selectedUid = '';
+  state.settingsOpen = false;
+  state.syncState = 'Locked';
+  state.syncDetail = detail;
+  render();
+  document.querySelector('#access-key')?.focus();
 }
 
 function renderWorldView() {
@@ -1182,6 +1202,8 @@ function bindDirectoryEvents() {
   document.querySelector('#settings-toggle').addEventListener('click', () => { state.settingsOpen = !state.settingsOpen; render(); });
   document.querySelector('#import')?.addEventListener('click', () => document.querySelector('#file')?.click());
   document.querySelector('#file')?.addEventListener('change', importLegacyFile);
+  document.querySelector('#change-github-token')?.addEventListener('click', () => endGithubSession('Enter a different GitHub access key.'));
+  document.querySelector('#logout-github')?.addEventListener('click', () => endGithubSession('You are logged out. Enter your access key to reconnect.'));
   document.querySelector('#groupmaker-toggle').addEventListener('click', () => { state.groupmakerOpen = !state.groupmakerOpen; render(); });
   document.querySelector('#api-studio-toggle')?.addEventListener('click', () => { state.apiStudioOpen = !state.apiStudioOpen; render(); });
   document.querySelector('#kindroid-panel-toggle')?.addEventListener('click', async () => {
