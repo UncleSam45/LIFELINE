@@ -138,7 +138,6 @@ const state = {
   activeEntryTab: 'profile',
   settingsOpen: false,
   kindroidPanelOpen: false,
-  heartbeatEditingId: '',
 };
 
 function escapeHtml(value) {
@@ -210,10 +209,6 @@ function heartbeatEntries() {
   if (!Array.isArray(state.config.heartbeat_entries)) state.config.heartbeat_entries = [];
   state.config.heartbeat_entries = state.config.heartbeat_entries.filter((entry) => entry && typeof entry === 'object');
   return state.config.heartbeat_entries;
-}
-
-function newHeartbeatId() {
-  return `heartbeat_${Date.now()}_${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
 }
 
 function groupmakerSessions() {
@@ -1001,14 +996,14 @@ function endGithubSession(detail) {
 
 function renderHeartbeatView() {
   const items = heartbeatEntries().slice().sort((a, b) => String(a.scheduled_at || '').localeCompare(String(b.scheduled_at || '')));
-  const editing = heartbeatEntries().find((entry) => entry.id === state.heartbeatEditingId);
+  const completedCount = items.filter((entry) => entry.completed).length;
+  const scheduledCount = items.length - completedCount;
   const rows = items.map((entry, index) => {
     const scheduled = entry.scheduled_at ? new Date(entry.scheduled_at) : null;
     const date = scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Any time';
-    return `<button class="heartbeat-item ${entry.completed ? 'completed' : ''}" type="button" data-heartbeat-id="${escapeHtml(entry.id)}"><span class="heartbeat-order">${String(index + 1).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'No description yet')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small>${entry.completed ? 'Completed' : 'Scheduled'}</small></span><span class="heartbeat-chevron" aria-hidden="true">›</span></button>`;
+    return `<article class="heartbeat-item ${entry.completed ? 'completed' : ''}"><span class="heartbeat-order">${String(index + 1).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'Details will be added soon.')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small><i aria-hidden="true"></i>${entry.completed ? 'Completed' : 'Scheduled'}</small></span></article>`;
   }).join('');
-  const modal = state.heartbeatEditingId ? `<dialog id="heartbeat-dialog" class="heartbeat-dialog" aria-labelledby="heartbeat-dialog-title"><form id="heartbeat-form" method="dialog"><div class="heartbeat-modal-head"><div><p class="eyebrow">OPERATION DETAILS</p><h2 id="heartbeat-dialog-title">${editing ? 'Edit entry' : 'New entry'}</h2></div><button id="heartbeat-close" class="ghost heartbeat-close" type="button" aria-label="Close">×</button></div><label><span>TITLE</span><input id="heartbeat-title" maxlength="100" required autofocus value="${escapeHtml(editing?.title || '')}" placeholder="What needs to happen?" /></label><label><span>DESCRIPTION</span><textarea id="heartbeat-description" maxlength="1000" placeholder="Add instructions, context, or a desired outcome…">${escapeHtml(editing?.description || '')}</textarea></label><label><span>DATE &amp; TIME</span><input id="heartbeat-scheduled" type="datetime-local" value="${escapeHtml(editing?.scheduled_at || '')}" /></label><label class="heartbeat-complete"><input id="heartbeat-completed" type="checkbox" ${editing?.completed ? 'checked' : ''}/><span>Mark this operation complete</span></label><div class="heartbeat-modal-actions">${editing ? '<button id="heartbeat-delete" class="danger" type="button">Delete</button>' : ''}<span></span><button id="heartbeat-cancel" class="ghost" type="button">Cancel</button><button type="submit">Save entry</button></div></form></dialog>` : '';
-  return `<section class="heartbeat-home"><header class="heartbeat-banner"><img src="./heartbeat.gif" alt="Animated heartbeat signal"/><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>Your living schedule for everything that needs to happen.</p></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">OPERATION QUEUE</p><h2>${items.length} ${items.length === 1 ? 'entry' : 'entries'}</h2></div><button id="heartbeat-add" type="button"><span aria-hidden="true">＋</span> Add entry</button></div><div class="heartbeat-list">${rows || '<div class="heartbeat-empty"><span>♡</span><h3>Your schedule is clear</h3><p>Add the first operation to start the pulse.</p><button id="heartbeat-empty-add" type="button">Create an entry</button></div>'}</div></section>${modal}</section>`;
+  return `<section class="heartbeat-home"><header class="heartbeat-banner"><div class="heartbeat-signal" aria-hidden="true"><span class="signal-grid"></span><svg viewBox="0 0 1000 240" preserveAspectRatio="none"><defs><linearGradient id="heartbeat-line" x1="0" x2="1"><stop stop-color="#ff5f87"/><stop offset=".52" stop-color="#ff9bb4"/><stop offset="1" stop-color="#69e5ff"/></linearGradient><filter id="heartbeat-glow"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="signal-shadow" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/><path class="signal-line" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/></svg></div><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><div class="heartbeat-live"><i aria-hidden="true"></i> SYSTEM ONLINE</div><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>A clear, dependable view of every scheduled operation.</p></div><div class="heartbeat-vitals" aria-label="Heartbeat summary"><div><strong>${String(items.length).padStart(2, '0')}</strong><span>Total</span></div><div><strong>${String(scheduledCount).padStart(2, '0')}</strong><span>Scheduled</span></div><div><strong>${String(completedCount).padStart(2, '0')}</strong><span>Complete</span></div></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">OPERATION QUEUE</p><h2>Current schedule</h2><p>Entries are managed by LIFELINE and shown here as a read-only feed.</p></div><span class="heartbeat-readonly"><i aria-hidden="true">◇</i> Read only</span></div><div class="heartbeat-list">${rows || '<div class="heartbeat-empty"><span aria-hidden="true">♡</span><h3>All quiet</h3><p>No operations are scheduled right now.</p></div>'}</div></section></section>`;
 }
 
 function renderDirectoryWorkspace(current, onlineLabel) {
@@ -1346,41 +1341,6 @@ function bindDirectoryEvents() {
   document.querySelector('#filter').value = state.filter;
   document.querySelector('#world-view')?.addEventListener('click', () => { state.activeView = 'world'; render(); });
   document.querySelector('#directory-view')?.addEventListener('click', () => { state.activeView = 'directory'; render(); });
-  const openHeartbeatEntry = (id = '__new__') => { state.heartbeatEditingId = id; render(); };
-  document.querySelector('#heartbeat-add')?.addEventListener('click', () => openHeartbeatEntry());
-  document.querySelector('#heartbeat-empty-add')?.addEventListener('click', () => openHeartbeatEntry());
-  document.querySelectorAll('.heartbeat-item').forEach((button) => button.addEventListener('click', () => openHeartbeatEntry(button.dataset.heartbeatId)));
-  const closeHeartbeatEntry = () => { state.heartbeatEditingId = ''; render(); };
-  document.querySelector('#heartbeat-close')?.addEventListener('click', closeHeartbeatEntry);
-  document.querySelector('#heartbeat-cancel')?.addEventListener('click', closeHeartbeatEntry);
-  document.querySelector('#heartbeat-dialog')?.addEventListener('cancel', (event) => { event.preventDefault(); closeHeartbeatEntry(); });
-  document.querySelector('#heartbeat-delete')?.addEventListener('click', () => {
-    const entry = heartbeatEntries().find((item) => item.id === state.heartbeatEditingId);
-    if (!entry || !confirm(`Delete “${entry.title || 'this entry'}”?`)) return;
-    state.config.heartbeat_entries = heartbeatEntries().filter((item) => item.id !== entry.id);
-    state.heartbeatEditingId = '';
-    saveBridge('Delete HEARTBEAT entry');
-  });
-  document.querySelector('#heartbeat-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    const title = document.querySelector('#heartbeat-title')?.value.trim();
-    if (!title) return;
-    let entry = heartbeatEntries().find((item) => item.id === state.heartbeatEditingId);
-    const isNew = !entry;
-    if (isNew) {
-      entry = { id: newHeartbeatId(), created_at: new Date().toISOString() };
-      heartbeatEntries().push(entry);
-    }
-    entry.title = title;
-    entry.description = document.querySelector('#heartbeat-description')?.value.trim() || '';
-    entry.scheduled_at = document.querySelector('#heartbeat-scheduled')?.value || '';
-    entry.completed = Boolean(document.querySelector('#heartbeat-completed')?.checked);
-    entry.updated_at = new Date().toISOString();
-    state.heartbeatEditingId = '';
-    saveBridge(isNew ? 'Add HEARTBEAT entry' : 'Update HEARTBEAT entry');
-  });
-  const heartbeatDialog = document.querySelector('#heartbeat-dialog');
-  if (heartbeatDialog && !heartbeatDialog.open) heartbeatDialog.showModal();
   document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
   document.querySelectorAll('.person').forEach((button) => button.addEventListener('click', () => { state.selectedUid = button.dataset.uid; state.activeView = 'directory'; state.activeEntryTab = 'profile'; render(); }));
