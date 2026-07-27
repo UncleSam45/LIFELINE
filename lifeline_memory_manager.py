@@ -76,6 +76,7 @@ APP_ROOT = Path(__file__).resolve().parent
 APP_DATA_DIR = _default_documents_dir() / "KINDROIDXL" / "kindroidxl_data"
 DEFAULT_BACKUP_ROOT = _default_documents_dir() / "KINDROIDXL-backups"
 DB_PATH = APP_DATA_DIR / "lifeline_memory.db"
+CREDENTIALS_PATH = APP_DATA_DIR / "lifeline_credentials.ini"
 LEGACY_DB_PATH = Path(__file__).with_name("lifeline_memory.db")
 RUNTIME_DB_PATH = DB_PATH
 RUNTIME_BACKUP_ROOT = DEFAULT_BACKUP_ROOT
@@ -98,6 +99,12 @@ def _bridge_token() -> str:
         if value:
             return value
     return ""
+
+
+def _credential_settings() -> QSettings:
+    """Return the stable, file-backed credential store used by every launch mode."""
+    CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    return QSettings(str(CREDENTIALS_PATH), QSettings.IniFormat)
 
 
 class GitHubBridge:
@@ -299,10 +306,12 @@ def _load_feeder_api_key() -> str:
 
         state = feeder._load_state()  # pylint: disable=protected-access
     except Exception:
-        return ""
-    if not bool(state.get("remember_api_key", True)):
-        return ""
-    return str(state.get("api_key", "")).strip()
+        state = {}
+    if bool(state.get("remember_api_key", True)):
+        feeder_key = str(state.get("api_key", "")).strip()
+        if feeder_key:
+            return feeder_key
+    return str(_credential_settings().value("kindroid_api_key", "") or "").strip()
 
 
 def _load_groupmaker_session_for_sources(source_file: str) -> Dict[str, Any]:
@@ -1561,7 +1570,7 @@ class MemoryExplorerDialog(QDialog):
 class MainWindow(QMainWindow):
     start_signal = Signal(); stop_signal = Signal()
     def __init__(self) -> None:
-        super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.credential_settings = QSettings('LIFELINE', 'MemoryManager'); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
+        super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.credential_settings = _credential_settings(); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
         self.setWindowTitle('LIFELINE CORE — Memory Intelligence Network'); self.resize(1480, 900); self.build_ui(); self.setup_tray(); self.load_settings(); self.restore_geometry(); self.refresh_tree(); self.refresh_stats(); QTimer.singleShot(250, self.check_ollama)
 
     def build_ui(self) -> None:
@@ -1584,11 +1593,13 @@ class MainWindow(QMainWindow):
         config = QFrame(); config.setObjectName('ConfigPanel'); top = QGridLayout(config); top.setContentsMargins(14, 12, 14, 12); top.setHorizontalSpacing(10); top.setVerticalSpacing(8); memory_layout.addWidget(config)
         self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
         self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
+        self.kindroid_api_key = QLineEdit(); self.kindroid_api_key.setEchoMode(QLineEdit.Password)
+        self.kindroid_api_key.setPlaceholderText('kn_ API key for context reminders')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
         start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch)
-        widgets = [('GitHub Fine-grained Token', self.github_token), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
+        widgets = [('GitHub Fine-grained Token', self.github_token), ('Kindroid API Key', self.kindroid_api_key), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
         for i,(lab,w) in enumerate(widgets): top.addWidget(QLabel(lab),0,i*2); top.addWidget(w,0,i*2+1)
-        top.addWidget(check,1,0); top.addWidget(selftest,1,5); top.addWidget(start,1,1); top.addWidget(stop,1,2)
+        top.addWidget(check,1,0); top.addWidget(selftest,1,7); top.addWidget(start,1,1); top.addWidget(stop,1,2)
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
@@ -1713,12 +1724,31 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
+        # Migrate the original platform-dependent QSettings location once. The
+        # explicit INI path remains stable whether Python, a launcher, or a
+        # packaged executable starts the manager.
+        legacy_credentials = QSettings('LIFELINE', 'MemoryManager')
+        for key in ('github_token', 'kindroid_api_key'):
+            if not str(self.credential_settings.value(key, '') or '').strip():
+                legacy_value = str(legacy_credentials.value(key, '') or '').strip()
+                if legacy_value:
+                    self.credential_settings.setValue(key, legacy_value)
+        self.credential_settings.sync()
         saved_token = str(self.credential_settings.value('github_token', '') or '').strip()
-        self.github_token.setText(_bridge_token() or saved_token); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
+        saved_kindroid_key = str(self.credential_settings.value('kindroid_api_key', '') or '').strip()
+        self.github_token.setText(_bridge_token() or saved_token); self.kindroid_api_key.setText(saved_kindroid_key); self.url.setText(self.settings.get('ollama_url')); self.model.setText(self.settings.get('ollama_model'))
         self.chunk.setValue(self.settings.int('chunk_size')); self.min_idle.setValue(self.settings.int('minimum_idle_chunk_size')); self.max_chunk.setValue(self.settings.int('maximum_chunk_size')); self.idle.setValue(self.settings.int('idle_timeout')); self.conf.setValue(self.settings.float('confidence_threshold'))
+        self.github_token.textChanged.connect(self.save_credentials)
+        self.kindroid_api_key.textChanged.connect(self.save_credentials)
+
+    def save_credentials(self, _value: str = '') -> None:
+        """Persist credentials immediately instead of waiting for a clean shutdown."""
+        self.credential_settings.setValue('github_token', self.github_token.text().strip())
+        self.credential_settings.setValue('kindroid_api_key', self.kindroid_api_key.text().strip())
+        self.credential_settings.sync()
 
     def save_settings(self) -> None:
-        self.credential_settings.setValue('github_token', self.github_token.text().strip()); self.credential_settings.sync()
+        self.save_credentials()
         for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
