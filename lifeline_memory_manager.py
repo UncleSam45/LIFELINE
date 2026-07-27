@@ -13,6 +13,7 @@ import importlib
 import json
 import hashlib
 import base64
+import math
 import os
 import queue
 import re
@@ -1024,6 +1025,8 @@ class OllamaClient:
 
 
 class MemoryExtractor:
+    CONFIDENCE_EPSILON = 1e-12
+
     def __init__(self, confidence: float) -> None:
         self.confidence = confidence
         self.rejected: List[str] = []
@@ -1113,7 +1116,13 @@ Return JSON in this exact shape:
                             clean_subjects.append(normalized_subject)
                 if not clean_subjects:
                     raise ValueError("no valid DIRECTORY/GROUPMAKER person subjects")
-                if conf < self.confidence: raise ValueError(f"confidence {conf} below threshold")
+                if not math.isfinite(conf):
+                    raise ValueError(f"invalid confidence {conf}")
+                # The gate is inclusive: a memory marked 0.90 must pass a 0.90
+                # threshold.  The epsilon only absorbs floating-point parsing
+                # noise and does not admit a meaningfully lower confidence.
+                if conf + self.CONFIDENCE_EPSILON < self.confidence:
+                    raise ValueError(f"confidence {conf} below threshold {self.confidence}")
                 if mtype not in VALID_TYPES: raise ValueError(f"invalid type {mtype}")
                 if not MEMORY_ACTION_PATTERN.search(desc): raise ValueError("description is not a durable participant event/status/preference")
                 subject_names = {str(s).strip().lower() for s in clean_subjects}
@@ -1601,6 +1610,7 @@ class MainWindow(QMainWindow):
         for i,(lab,w) in enumerate(widgets): top.addWidget(QLabel(lab),0,i*2); top.addWidget(w,0,i*2+1)
         top.addWidget(check,1,0); top.addWidget(selftest,1,7); top.addWidget(start,1,1); top.addWidget(stop,1,2)
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
+        self.conf.valueChanged.connect(self.save_confidence_threshold)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
         split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); memory_layout.addWidget(split, 1)
@@ -1752,6 +1762,10 @@ class MainWindow(QMainWindow):
         for k,w in [('ollama_url',self.url),('ollama_model',self.model)]: self.settings.set(k,w.text())
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
+
+    def save_confidence_threshold(self, value: float) -> None:
+        """Apply confidence-gate edits immediately, including while monitoring."""
+        self.settings.set('confidence_threshold', value)
 
     def restore_geometry(self) -> None:
         data = self.settings.get('window_geometry')
