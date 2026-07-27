@@ -36,12 +36,15 @@ const REMEMBER_STORAGE_KEY = 'lifeline.bridge.rememberAccessKey';
 const KINDROID_API_KEY_STORAGE_KEY = 'lifeline.kindroid.apiKey';
 const WEATHER_API_KEY_STORAGE_KEY = 'lifeline.weather.apiKey';
 const WEATHER_API_URL = 'https://api.weatherapi.com/v1/forecast.json';
+const NEWS_API_KEY_STORAGE_KEY = 'lifeline.news.apiKey';
+const NEWS_API_URL = 'https://newsapi.org/v2/top-headlines';
 const KINDROID_BASE_URL = 'https://api.kindroid.ai/v1';
 const GROUPMAKER_REQUESTER = 'LIFELINE-MAINJS-GROUPMAKER';
 const PHONE_CALL_DIRECTIVE = 'This is a phone call. Respond in direct speech only. Avoid action or inner thought narration. Keep it concise.';
 const REMEMBERED_ACCESS_KEY = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
 const REMEMBERED_KINDROID_API_KEY = localStorage.getItem(KINDROID_API_KEY_STORAGE_KEY) || '';
 const REMEMBERED_WEATHER_API_KEY = localStorage.getItem(WEATHER_API_KEY_STORAGE_KEY) || '';
+const REMEMBERED_NEWS_API_KEY = localStorage.getItem(NEWS_API_KEY_STORAGE_KEY) || '';
 const REMEMBERED_KINDROID_CONNECTED = REMEMBERED_KINDROID_API_KEY.trim().startsWith('kn_');
 const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true' && Boolean(REMEMBERED_ACCESS_KEY.trim());
 let groupmakerDraftSaveTimer = null;
@@ -121,6 +124,12 @@ const state = {
   weatherBusy: false,
   weatherError: '',
   weatherData: null,
+  newsApiKey: REMEMBERED_NEWS_API_KEY,
+  newsOpen: false,
+  newsBusy: false,
+  newsError: '',
+  newsData: null,
+  newsRegion: 'quebec',
   groupmakerOpen: true,
   groupmakerMinimized: false,
   groupmakerBusy: false,
@@ -1043,17 +1052,62 @@ async function fetchMontrealWeather() {
   }
 }
 
+const NEWS_REGIONS = Object.freeze({
+  quebec: { label: 'Québec', country: 'ca', query: 'Quebec OR Québec' },
+  canada: { label: 'Canada', country: 'ca' },
+  usa: { label: 'USA', country: 'us' },
+});
+
+function formatNewsDate(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 'Recently' : date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function renderNewsAutomation() {
+  const feeds = state.newsData || {};
+  const articles = Array.isArray(feeds[state.newsRegion]?.articles) ? feeds[state.newsRegion].articles : [];
+  const credentialLabel = state.newsApiKey ? 'Credential saved on this device' : 'API key required';
+  return `<section class="news-automation"><button id="news-back" class="weather-back ghost" type="button">← All automations</button><header class="news-hero"><div><span class="news-kicker">HEARTBEAT · NEWS</span><h1>The stories<br><em>shaping home.</em></h1><p>Top headlines from Québec, Canada, and the United States—refreshed whenever you ask.</p></div><div class="news-globe" aria-hidden="true"><span>◉</span></div></header><section class="weather-controls news-controls"><div class="weather-key-copy"><span class="weather-lock">N</span><div><b>NewsAPI credential</b><small>${escapeHtml(credentialLabel)}</small></div></div><label class="weather-key-field"><span>API KEY</span><input id="news-api-key" type="password" value="${escapeHtml(state.newsApiKey)}" placeholder="Paste your NewsAPI key" autocomplete="off" spellcheck="false"></label><div class="weather-actions"><button id="news-fetch" type="button" ${state.newsBusy ? 'disabled' : ''}>${state.newsBusy ? 'FETCHING HEADLINES…' : state.newsApiKey ? 'REFRESH NEWS' : 'SAVE & FETCH'}</button>${state.newsApiKey ? '<button id="news-forget" class="ghost" type="button">FORGET KEY</button>' : ''}</div></section>${state.newsError ? `<div class="weather-message weather-error" role="alert"><b>News unavailable</b><span>${escapeHtml(state.newsError)}</span></div>` : ''}${state.newsData ? `<section class="news-feed"><div class="news-feed-head"><div><span>TOP HEADLINES</span><h2>Across the region</h2></div><nav class="news-tabs" aria-label="News region">${Object.entries(NEWS_REGIONS).map(([key, region]) => `<button class="${state.newsRegion === key ? 'active' : ''}" data-news-region="${key}" type="button">${region.label}<small>${Number(feeds[key]?.totalResults || feeds[key]?.articles?.length || 0)}</small></button>`).join('')}</nav></div><div class="news-grid">${articles.length ? articles.map((article) => `<article class="news-card">${article.urlToImage ? `<img src="${escapeHtml(article.urlToImage)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<div class="news-placeholder" aria-hidden="true">NEWS</div>'}<div class="news-card-copy"><div><span>${escapeHtml(article.source?.name || 'News source')}</span><time datetime="${escapeHtml(article.publishedAt || '')}">${escapeHtml(formatNewsDate(article.publishedAt))}</time></div><h3>${escapeHtml(article.title || 'Untitled headline')}</h3><p>${escapeHtml(article.description || 'Open the story for the latest details.')}</p>${article.url ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener noreferrer">READ FULL STORY <span aria-hidden="true">↗</span></a>` : ''}</div></article>`).join('') : '<div class="news-empty"><b>No headlines found</b><p>Try refreshing in a moment.</p></div>'}</div></section>` : `<section class="weather-welcome news-welcome"><span aria-hidden="true">◎</span><div><h2>Your briefing is ready to begin</h2><p>Add your NewsAPI key above. It stays in this browser and is only sent to NewsAPI when you request headlines.</p></div></section>`}</section>`;
+}
+
+async function fetchRegionalNews() {
+  const key = document.querySelector('#news-api-key')?.value.trim() || state.newsApiKey;
+  if (!key) { state.newsError = 'Enter your NewsAPI key to continue.'; render(); return; }
+  state.newsApiKey = key;
+  localStorage.setItem(NEWS_API_KEY_STORAGE_KEY, key);
+  state.newsBusy = true;
+  state.newsError = '';
+  render();
+  try {
+    const responses = await Promise.all(Object.entries(NEWS_REGIONS).map(async ([regionKey, region]) => {
+      const params = new URLSearchParams({ country: region.country, pageSize: '20' });
+      if (region.query) params.set('q', region.query);
+      const response = await fetch(`${NEWS_API_URL}?${params.toString()}`, { headers: { Accept: 'application/json', 'X-Api-Key': key } });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || payload.status === 'error') throw new Error(payload.message || `NewsAPI returned HTTP ${response.status}.`);
+      return [regionKey, payload];
+    }));
+    state.newsData = Object.fromEntries(responses);
+  } catch (error) {
+    state.newsError = error instanceof TypeError ? 'Could not reach NewsAPI. Check your connection and NewsAPI plan access, then try again.' : String(error?.message || error);
+  } finally {
+    state.newsBusy = false;
+    render();
+  }
+}
+
 function renderHeartbeatView() {
   if (state.weatherOpen) return renderWeatherAutomation();
+  if (state.newsOpen) return renderNewsAutomation();
   const items = heartbeatEntries().slice().sort((a, b) => String(a.scheduled_at || '').localeCompare(String(b.scheduled_at || '')));
   const completedCount = items.filter((entry) => entry.completed).length;
   const scheduledCount = items.length - completedCount;
   const rows = items.map((entry, index) => {
     const scheduled = entry.scheduled_at ? new Date(entry.scheduled_at) : null;
     const date = scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Any time';
-    return `<article class="heartbeat-item ${entry.completed ? 'completed' : ''}"><span class="heartbeat-order">${String(index + 2).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'Details will be added soon.')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small><i aria-hidden="true"></i>${entry.completed ? 'Completed' : 'Scheduled'}</small></span></article>`;
+    return `<article class="heartbeat-item ${entry.completed ? 'completed' : ''}"><span class="heartbeat-order">${String(index + 3).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'Details will be added soon.')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small><i aria-hidden="true"></i>${entry.completed ? 'Completed' : 'Scheduled'}</small></span></article>`;
   }).join('');
-  return `<section class="heartbeat-home"><header class="heartbeat-banner"><div class="heartbeat-signal" aria-hidden="true"><span class="signal-grid"></span><svg viewBox="0 0 1000 240" preserveAspectRatio="none"><defs><linearGradient id="heartbeat-line" x1="0" x2="1"><stop stop-color="#ff5f87"/><stop offset=".52" stop-color="#ff9bb4"/><stop offset="1" stop-color="#69e5ff"/></linearGradient><filter id="heartbeat-glow"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="signal-shadow" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/><path class="signal-line" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/></svg></div><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><div class="heartbeat-live"><i aria-hidden="true"></i> SYSTEM ONLINE</div><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>A clear, dependable view of every scheduled operation.</p></div><div class="heartbeat-vitals" aria-label="Heartbeat summary"><div><strong>${String(items.length + 1).padStart(2, '0')}</strong><span>Total</span></div><div><strong>${String(scheduledCount).padStart(2, '0')}</strong><span>Scheduled</span></div><div><strong>${String(completedCount).padStart(2, '0')}</strong><span>Complete</span></div></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">AUTOMATIONS</p><h2>Available entries</h2><p>Open an automation to configure it and run it on demand.</p></div><span class="heartbeat-readonly"><i aria-hidden="true">◇</i> Heartbeat</span></div><div class="heartbeat-list"><button id="weather-automation" class="heartbeat-item heartbeat-automation" type="button"><span class="heartbeat-order weather-order">☀</span><span class="heartbeat-copy"><strong>Weather</strong><small>Current Montréal weather and a seven-day forecast.</small></span><span class="heartbeat-time"><b>On demand</b><small><i aria-hidden="true"></i>${state.weatherApiKey ? 'Ready' : 'Setup required'}</small></span></button>${rows}</div></section></section>`;
+  return `<section class="heartbeat-home"><header class="heartbeat-banner"><div class="heartbeat-signal" aria-hidden="true"><span class="signal-grid"></span><svg viewBox="0 0 1000 240" preserveAspectRatio="none"><defs><linearGradient id="heartbeat-line" x1="0" x2="1"><stop stop-color="#ff5f87"/><stop offset=".52" stop-color="#ff9bb4"/><stop offset="1" stop-color="#69e5ff"/></linearGradient><filter id="heartbeat-glow"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="signal-shadow" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/><path class="signal-line" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/></svg></div><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><div class="heartbeat-live"><i aria-hidden="true"></i> SYSTEM ONLINE</div><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>A clear, dependable view of every scheduled operation.</p></div><div class="heartbeat-vitals" aria-label="Heartbeat summary"><div><strong>${String(items.length + 2).padStart(2, '0')}</strong><span>Total</span></div><div><strong>${String(scheduledCount).padStart(2, '0')}</strong><span>Scheduled</span></div><div><strong>${String(completedCount).padStart(2, '0')}</strong><span>Complete</span></div></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">AUTOMATIONS</p><h2>Available entries</h2><p>Open an automation to configure it and run it on demand.</p></div><span class="heartbeat-readonly"><i aria-hidden="true">◇</i> Heartbeat</span></div><div class="heartbeat-list"><button id="weather-automation" class="heartbeat-item heartbeat-automation" type="button"><span class="heartbeat-order weather-order">☀</span><span class="heartbeat-copy"><strong>Weather</strong><small>Current Montréal weather and a seven-day forecast.</small></span><span class="heartbeat-time"><b>On demand</b><small><i aria-hidden="true"></i>${state.weatherApiKey ? 'Ready' : 'Setup required'}</small></span></button><button id="news-automation" class="heartbeat-item heartbeat-automation news-entry" type="button"><span class="heartbeat-order news-order">N</span><span class="heartbeat-copy"><strong>News</strong><small>Top headlines from Québec, Canada, and the USA.</small></span><span class="heartbeat-time"><b>On demand</b><small><i aria-hidden="true"></i>${state.newsApiKey ? 'Ready' : 'Setup required'}</small></span></button>${rows}</div></section></section>`;
 }
 
 function renderDirectoryWorkspace(current, onlineLabel) {
@@ -1402,6 +1456,21 @@ function bindDirectoryEvents() {
     state.weatherError = '';
     render();
   });
+  document.querySelector('#news-automation')?.addEventListener('click', () => { state.newsOpen = true; render(); });
+  document.querySelector('#news-back')?.addEventListener('click', () => { state.newsOpen = false; state.newsError = ''; render(); });
+  document.querySelector('#news-fetch')?.addEventListener('click', fetchRegionalNews);
+  document.querySelector('#news-api-key')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') fetchRegionalNews(); });
+  document.querySelector('#news-forget')?.addEventListener('click', () => {
+    localStorage.removeItem(NEWS_API_KEY_STORAGE_KEY);
+    state.newsApiKey = '';
+    state.newsData = null;
+    state.newsError = '';
+    render();
+  });
+  document.querySelectorAll('[data-news-region]').forEach((button) => button.addEventListener('click', () => {
+    if (NEWS_REGIONS[button.dataset.newsRegion]) state.newsRegion = button.dataset.newsRegion;
+    render();
+  }));
   document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
   document.querySelectorAll('.person').forEach((button) => button.addEventListener('click', () => { state.selectedUid = button.dataset.uid; state.activeView = 'directory'; state.activeEntryTab = 'profile'; render(); }));
