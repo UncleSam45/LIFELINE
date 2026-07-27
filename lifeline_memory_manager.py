@@ -13,6 +13,7 @@ import importlib
 import json
 import hashlib
 import base64
+import math
 import os
 import queue
 import re
@@ -44,8 +45,9 @@ class DependencyInstaller:
 DependencyInstaller.ensure()
 
 import requests  # noqa: E402
-from PySide6.QtCore import QObject, QSettings, QSharedMemory, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
+from PySide6.QtCore import QObject, QSettings, QSize, QThread, QTimer, Qt, Signal, Slot  # noqa: E402
 from PySide6.QtGui import QAction, QFont, QIcon  # noqa: E402
+from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QDialog, QFormLayout, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QPlainTextEdit,
@@ -90,7 +92,8 @@ BRIDGE_TOKEN_ENV_KEYS = ("LIFELINE_BRIDGE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 BRIDGE_MEMORY_LATEST_PATH = "memory/lifeline_memory.latest.db"
 BRIDGE_MEMORY_SNAPSHOT_ROOT = "memory/snapshots"
 BRIDGE_TRANSCRIPT_ROOT = "transcripts"
-_INSTANCE_GUARD = None
+_INSTANCE_SERVER = None
+INSTANCE_SERVER_NAME = "LIFELINE_MEMORY_MANAGER_INSTANCE_SERVER"
 
 
 def _bridge_token() -> str:
@@ -164,24 +167,9 @@ class GitHubBridge:
         )
         response.raise_for_status()
 
-    def transcript_documents(self) -> List[Tuple[str, List[str], List[str]]]:
-        """Return bridge transcript paths, entries, and authoritative participants."""
-        documents: List[Tuple[str, List[str], List[str]]] = []
-        config_data, _config_sha = self.read_bytes("config.json")
-        try:
-            config = json.loads(config_data.decode("utf-8")) if config_data else {}
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            config = {}
-        sessions = config.get("groupmaker_sessions", []) if isinstance(config, dict) else []
-        participants_by_group: Dict[str, List[str]] = {}
-        for session in sessions if isinstance(sessions, list) else []:
-            if not isinstance(session, dict):
-                continue
-            group_id = str(session.get("group_id") or "").strip()
-            raw_names = session.get("names", [])
-            names = list(dict.fromkeys(str(name).strip() for name in raw_names if str(name).strip())) if isinstance(raw_names, list) else []
-            if group_id and names:
-                participants_by_group[group_id] = names
+    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str]]:
+        """Return transcript paths, entries, current participants, and target group IDs."""
+        documents: List[Tuple[str, List[str], List[str], str]] = []
         for group in self.list_tree(BRIDGE_TRANSCRIPT_ROOT):
             if group.get("type") != "dir":
                 continue
@@ -197,18 +185,9 @@ class GitHubBridge:
                 entries = [str(entry).strip() for entry in raw_entries if str(entry).strip()]
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
-                if not participants:
-                    group_id = str(payload.get("group_id") or group_name).strip() if isinstance(payload, dict) else group_name
-                    participants = participants_by_group.get(group_id, [])
-                documents.append((str(item.get("path")), entries, participants))
+                group_id = str(payload.get("group_id") or "").strip() if isinstance(payload, dict) else ""
+                documents.append((str(item.get("path")), entries, participants, group_id))
         return documents
-
-GENERIC_KEYWORDS = {
-    "week", "today", "tomorrow", "yesterday", "thing", "things", "discussion", "talk", "chat",
-    "conversation", "good", "bad", "nice", "great", "next week", "later", "soon", "stuff", "person",
-    "kiss", "kissing", "hug", "hugging", "smile", "laugh", "look", "touch", "hand", "eyes",
-    "wall", "walls", "floor", "ceiling", "room", "rooms", "door", "doors", "window", "windows",
-}
 
 NON_PERSON_SUBJECTS = {
     "judge", "judges", "jury", "court", "lawyer", "lawyers", "council", "committee", "team", "people", "person", "group", "everyone",
@@ -218,14 +197,6 @@ NON_PERSON_SUBJECTS = {
 
 MAX_CONTEXT_REMINDERS_PER_CHUNK = 1
 CONTEXT_REMINDER_COOLDOWN_SECONDS = 3600
-
-MEMORY_ACTION_PATTERN = re.compile(
-    r"\b(said|asked|told|shared|revealed|learned|decided|planned|agreed|promised|prefers|likes|"
-    r"dislikes|wants|needs|is|was|has|had|will|works|created|completed|started|joined|left|"
-    r"remembered|reported|confirmed|changed|updated|met|called|messaged)\b",
-    re.IGNORECASE,
-)
-
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help="--help" in argv or "-h" in argv)
@@ -286,10 +257,12 @@ def _normalized_text_key(text: str) -> str:
 def _valid_person_subject(name: str, allowed: Set[str] | None = None, known: Set[str] | None = None) -> bool:
     clean = re.sub(r"\s+", " ", str(name).strip())
     folded = clean.casefold()
-    if not clean or folded in NON_PERSON_SUBJECTS:
+    if not clean:
         return False
     if allowed is not None:
         return folded in allowed
+    if folded in NON_PERSON_SUBJECTS:
+        return False
     if known and folded in known:
         return True
     if len(clean) < 2 or len(clean) > 80 or any(ch.isdigit() for ch in clean):
@@ -774,6 +747,29 @@ class MemoryDB:
             raise RuntimeError(f"Memory cleared, but mirror update failed: {detail}")
         return deleted, snapshot
 
+    def clear_finder_memory(self) -> Tuple[int, str]:
+        """Forget processed transcript chunks without deleting extracted memories."""
+        ok, snapshot = self.mirror_to_external_backup(create_snapshot=True)
+        if not ok:
+            raise RuntimeError(f"Backup snapshot failed; finder memory was not cleared: {snapshot}")
+        with self.lock, self.connect() as conn:
+            try:
+                conn.execute("BEGIN")
+                count = int(conn.execute("SELECT COUNT(*) FROM transcript_chunks").fetchone()[0])
+                conn.execute("UPDATE memory_events SET source_chunk_id=NULL WHERE source_chunk_id IS NOT NULL")
+                conn.execute("DELETE FROM transcript_chunks")
+                conn.execute("DELETE FROM sqlite_sequence WHERE name='transcript_chunks'")
+                self._mark_changed(conn, "clear_finder_memory")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        self.last_write = now_human()
+        ok, detail = self.mirror_to_external_backup(create_snapshot=False)
+        if not ok:
+            raise RuntimeError(f"Finder memory cleared, but mirror update failed: {detail}")
+        return count, snapshot
+
     def _person_id(self, conn: sqlite3.Connection, name: str) -> int:
         name = name.strip().upper()
         ts = now_iso()
@@ -1024,6 +1020,8 @@ class OllamaClient:
 
 
 class MemoryExtractor:
+    CONFIDENCE_EPSILON = 1e-12
+
     def __init__(self, confidence: float) -> None:
         self.confidence = confidence
         self.rejected: List[str] = []
@@ -1032,30 +1030,24 @@ class MemoryExtractor:
         people_text = ", ".join(str(name).strip() for name in present_people if str(name).strip())
         return f'''You are a memory extraction engine for an AI companion memory database.
 
-Your job is to read a transcript chunk and extract only clear, useful memories.
+Your job is to read a transcript chunk and extract useful memories about the people currently present.
 
 Rules:
 - Return only valid JSON.
 - Do not include markdown.
 - Do not invent facts.
-- Do not extract vague or unclear information.
-- Do not extract meaningless small talk.
-- Do not extract scenery, props, objects, body parts, or background facts unless a present participant made a durable decision/preference/status about them.
+- Prefer information that may be useful in a later conversation, but do not require a special action verb or a long-term commitment.
 - Every memory must include a date and time in the description.
 - Write transcript actions/events in past tense (for example, "participated in a podcast" instead of "starts a podcast"); only ongoing statuses may stay present-tense when that is the fact being remembered.
 - Participant names are subjects, never keywords.
-- Subjects must be specific named individual people only. Never create subjects such as judges, people, everyone, user, assistant, narrator, or groups/roles.
-- Use ONLY the present GROUPMAKER participants listed below as subjects. If none of those exact participants performed/said/planned/revealed something durable, return {{"memories": []}}.
-- Keywords must be durable topics, objects, activities, concepts, statuses, or media references.
-- Do not create separate memories for tiny repeated gestures or phrasing variations such as kiss, kiss with passion, kiss tenderly, hug, look, smile, touch.
-- Do not use generic keywords like week, today, tomorrow, thing, discussion, talk, good, bad.
-- If a named media/public reference is needed, use the full phrase as one keyword, such as "steven seagal".
+- Every subject must exactly match a participant listed in the current transcript metadata below.
+- Use short, useful keywords; if no specific keyword fits, use the memory type.
 - If nothing meaningful is found, return {{"memories": []}}.
 
 Current date/time:
 {now_human()}
 
-Present GROUPMAKER participants allowed as subjects:
+Participants currently present in this transcript:
 {people_text or '(none - return {{"memories": []}})'}
 
 Transcript chunk:
@@ -1112,20 +1104,26 @@ Return JSON in this exact shape:
                         if normalized_subject not in clean_subjects:
                             clean_subjects.append(normalized_subject)
                 if not clean_subjects:
-                    raise ValueError("no valid DIRECTORY/GROUPMAKER person subjects")
-                if conf < self.confidence: raise ValueError(f"confidence {conf} below threshold")
+                    raise ValueError("no subject currently present in transcript participants")
+                if not math.isfinite(conf):
+                    raise ValueError(f"invalid confidence {conf}")
+                # The gate is inclusive: a memory marked 0.90 must pass a 0.90
+                # threshold.  The epsilon only absorbs floating-point parsing
+                # noise and does not admit a meaningfully lower confidence.
+                if conf + self.CONFIDENCE_EPSILON < self.confidence:
+                    raise ValueError(f"confidence {conf} below threshold {self.confidence}")
                 if mtype not in VALID_TYPES: raise ValueError(f"invalid type {mtype}")
-                if not MEMORY_ACTION_PATTERN.search(desc): raise ValueError("description is not a durable participant event/status/preference")
                 subject_names = {str(s).strip().lower() for s in clean_subjects}
                 norm = []
                 for kw in sorted(kws, key=lambda value: len(str(value))):
                     k = re.sub(r"\s+", " ", str(kw).strip().lower())
-                    if not k or k in GENERIC_KEYWORDS or k in subject_names: continue
-                    if len(k) < 3 or len(k) > 48 or len(k.split()) > 3: continue
+                    if not k or k in subject_names: continue
+                    if len(k) > 80 or len(k.split()) > 8: continue
                     if any(k == existing or k in existing or existing in k for existing in norm): continue
                     norm.append(k)
                     if len(norm) >= 3: break
-                if not norm: raise ValueError("no usable keywords after normalization")
+                if not norm:
+                    norm = [mtype]
                 if not re.search(r"\d{4}-\d{2}-\d{2}.*\d{1,2}:\d{2}", desc):
                     desc = f"On {now_human()}, {desc}"
                 desc = self._past_tense_description(desc)
@@ -1199,8 +1197,11 @@ class TranscriptBuffer:
 
     def pop_chunk(self) -> Tuple[str, Dict[str, int]]:
         remaining = self.maximum; parts = []; consumed: Dict[str, int] = {}
+        source = self.items[0].source if self.items else ""
         while self.items and remaining > 0:
             item = self.items[0]; take = min(len(item.text), remaining)
+            if item.source != source:
+                break
             parts.append(item.text[:take]); consumed[item.source] = consumed.get(item.source, 0) + take
             item.text = item.text[take:]; self.size -= take; remaining -= take
             if not item.text: self.items.pop(0)
@@ -1214,6 +1215,7 @@ class ProcessingWorker(QObject):
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
         self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
         self.remote_participants: Dict[str, List[str]] = {}
+        self.remote_group_ids: Dict[str, str] = {}
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
         self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
 
@@ -1248,8 +1250,9 @@ class ProcessingWorker(QObject):
         self.stop()
 
     def poll_github_transcripts(self) -> None:
-        for source, entries, participants in self.bridge.transcript_documents():
+        for source, entries, participants, group_id in self.bridge.transcript_documents():
             self.remote_participants[source] = participants
+            self.remote_group_ids[source] = group_id
             old_count = self.remote_entry_counts.get(source, 0)
             if len(entries) < old_count:
                 old_count = 0
@@ -1258,7 +1261,11 @@ class ProcessingWorker(QObject):
             if new_entries:
                 text = "\n".join(new_entries)
                 self.buffer.add(source, text)
-                self.log.emit(f"Fetched {len(new_entries)} new transcript entries ({len(text)} chars) from {source}")
+                participant_text = ", ".join(participants) or "none listed"
+                self.log.emit(
+                    f"Fetched {len(new_entries)} new transcript entries ({len(text)} chars) from {source}; "
+                    f"current participants: {participant_text}; reminder target group: {group_id or 'none'}"
+                )
 
     def process_one(self) -> None:
         chunk, consumed = self.buffer.pop_chunk()
@@ -1267,20 +1274,27 @@ class ProcessingWorker(QObject):
         if self.db.chunk_already_processed(chunk) or self.db.chunk_already_seen_in_recent_source(source, chunk):
             self.log.emit(f"Skipped already-processed transcript chunk from {source} without calling Ollama.")
             return
-        session = _load_groupmaker_session_for_sources(source)
-        group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
-        if not group_people:
-            group_people = list(dict.fromkeys(
-                name
-                for consumed_source in consumed
-                for name in self.remote_participants.get(consumed_source, [])
-                if name
-            ))
+        group_people = list(dict.fromkeys(
+            name
+            for consumed_source in consumed
+            for name in self.remote_participants.get(consumed_source, [])
+            if name
+        ))
         if not group_people:
             self.db.store_processed_chunk(source, chunk, [])
-            self.log.emit(f"Skipped memory extraction for {source}: transcript metadata and active GROUPMAKER state contain no participants.")
+            self.log.emit(f"Skipped memory extraction for {source}: transcript.json contains no participants.")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
             return
+        group_id = next((self.remote_group_ids.get(consumed_source, "") for consumed_source in consumed if self.remote_group_ids.get(consumed_source, "")), "")
+        session: Dict[str, Any] = {"group_id": group_id, "names": group_people, "ai_list": []}
+        local_session = _load_groupmaker_session_for_sources(source)
+        if group_id and str(local_session.get("group_id", "")).strip() == group_id:
+            ai_by_name = {
+                str(name).strip().casefold(): str(ai_id).strip()
+                for name, ai_id in zip(local_session.get("names", []), local_session.get("ai_list", []))
+                if str(name).strip() and str(ai_id).strip()
+            }
+            session["ai_list"] = [ai_by_name.get(name.casefold(), "") for name in group_people]
         client = OllamaClient(self.settings.get('ollama_url'), self.settings.get('ollama_model'))
         extractor = MemoryExtractor(self.settings.float('confidence_threshold'))
         prompt = extractor.prompt(chunk, group_people); self.output.emit('Prompt Sent', prompt); self.status.emit('Processing')
@@ -1304,8 +1318,11 @@ class ProcessingWorker(QObject):
         session = session or _load_groupmaker_session_for_sources(source)
         group_id = str(session.get("group_id", "")).strip()
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
-        if not group_id or not group_people:
-            self.log.emit("Context reminder skipped: transcript is not attached to an open GROUPMAKER group.")
+        if not group_people:
+            self.log.emit("Context reminder skipped: transcript.json contains no current participants.")
+            return
+        if not group_id:
+            self.log.emit("Context reminder skipped: transcript.json has no target group_id; memory extraction continues normally.")
             return
 
         reminders = self.db.context_reminders_for_transcript(chunk, group_people)
@@ -1342,7 +1359,7 @@ class ProcessingWorker(QObject):
                 self.context_reminder_sent_at[cooldown_key] = now
                 self.log.emit(f"Sent context reminder to GROUPMAKER group {group_id}: {label} ({status})")
                 if not participant_targets:
-                    self.log.emit("Direct context reminder skipped: active GROUPMAKER session has no participant ai_id values.")
+                    self.log.emit("Direct context reminder skipped: current transcript participants have no mapped ai_id values.")
                 for participant_name, ai_id in participant_targets:
                     direct_ok, direct_status = _send_direct_context_reminder(ai_id, reminder["description"])
                     if direct_ok:
@@ -1571,7 +1588,7 @@ class MainWindow(QMainWindow):
     start_signal = Signal(); stop_signal = Signal()
     def __init__(self) -> None:
         super().__init__(); self.db = MemoryDB(); self.settings = AppSettings(self.db); self.credential_settings = _credential_settings(); self.worker_thread: Optional[QThread] = None; self.worker: Optional[ProcessingWorker] = None; self.last_error = ''; self.force_quit = False; self.tray_icon: Optional[QSystemTrayIcon] = None
-        self.setWindowTitle('LIFELINE CORE — Memory Intelligence Network'); self.resize(1480, 900); self.build_ui(); self.setup_tray(); self.load_settings(); self.restore_geometry(); self.refresh_tree(); self.refresh_stats(); QTimer.singleShot(250, self.check_ollama)
+        self.setWindowTitle('LIFELINE CORE — Memory Intelligence Network'); self.resize(1480, 900); self.build_ui(); self.setup_tray(); self.load_settings(); self.restore_geometry(); self.refresh_tree(); self.refresh_stats(); QTimer.singleShot(100, lambda: self.start_watch(silent=True)); QTimer.singleShot(250, self.check_ollama)
 
     def build_ui(self) -> None:
         self.apply_core_style()
@@ -1596,11 +1613,12 @@ class MainWindow(QMainWindow):
         self.kindroid_api_key = QLineEdit(); self.kindroid_api_key.setEchoMode(QLineEdit.Password)
         self.kindroid_api_key.setPlaceholderText('kn_ API key for context reminders')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
-        start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch)
+        start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch); clear_finder = QPushButton('Clear Finder Memory'); clear_finder.clicked.connect(self.clear_finder_memory)
         widgets = [('GitHub Fine-grained Token', self.github_token), ('Kindroid API Key', self.kindroid_api_key), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
         for i,(lab,w) in enumerate(widgets): top.addWidget(QLabel(lab),0,i*2); top.addWidget(w,0,i*2+1)
-        top.addWidget(check,1,0); top.addWidget(selftest,1,7); top.addWidget(start,1,1); top.addWidget(stop,1,2)
+        top.addWidget(check,1,0); top.addWidget(start,1,1); top.addWidget(stop,1,2); top.addWidget(clear_finder,1,3); top.addWidget(selftest,1,7)
         self.chunk = QSpinBox(); self.chunk.setRange(500,100000); self.min_idle = QSpinBox(); self.min_idle.setRange(100,100000); self.max_chunk = QSpinBox(); self.max_chunk.setRange(500,200000); self.idle = QSpinBox(); self.idle.setRange(5,3600); self.conf = QDoubleSpinBox(); self.conf.setRange(0,1); self.conf.setSingleStep(.05)
+        self.conf.valueChanged.connect(self.save_confidence_threshold)
         for i,(lab,w) in enumerate([('Target Signal Size',self.chunk),('Minimum Buffer',self.min_idle),('Maximum Signal Size',self.max_chunk),('Idle Gate Seconds',self.idle),('Confidence Gate',self.conf)]): top.addWidget(QLabel(lab),2,i*2); top.addWidget(w,2,i*2+1)
 
         split = QSplitter(Qt.Horizontal); split.setObjectName('CoreSplitter'); memory_layout.addWidget(split, 1)
@@ -1753,6 +1771,10 @@ class MainWindow(QMainWindow):
         for k,w in [('chunk_size',self.chunk),('minimum_idle_chunk_size',self.min_idle),('maximum_chunk_size',self.max_chunk),('idle_timeout',self.idle)]: self.settings.set(k,w.value())
         self.settings.set('confidence_threshold', self.conf.value())
 
+    def save_confidence_threshold(self, value: float) -> None:
+        """Apply confidence-gate edits immediately, including while monitoring."""
+        self.settings.set('confidence_threshold', value)
+
     def restore_geometry(self) -> None:
         data = self.settings.get('window_geometry')
         if data:
@@ -1764,9 +1786,13 @@ class MainWindow(QMainWindow):
     def check_ollama(self) -> None:
         self.save_settings(); ok,msg = OllamaClient(self.url.text(), self.model.text()).check(); self.append_log(msg); self.status_label.setText(msg if not ok else 'Idle')
 
-    def start_watch(self) -> None:
+    def start_watch(self, _checked: bool = False, silent: bool = False) -> None:
         token = self.github_token.text().strip()
         if not token:
+            if silent:
+                self.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
+                self.status_label.setText('GitHub token required')
+                return
             QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository.')
             self.github_token.setFocus(); return
         self.save_settings();
@@ -1774,6 +1800,9 @@ class MainWindow(QMainWindow):
         try:
             GitHubBridge(token).validate_access()
         except requests.RequestException as exc:
+            if silent:
+                self.show_error(f'Automatic GitHub monitoring could not start: {exc}')
+                return
             QMessageBox.critical(self, 'GitHub access failed', f'The token could not access {BRIDGE_OWNER}/{BRIDGE_REPO}.\n\n{exc}')
             return
         self.db.bridge = GitHubBridge(token)
@@ -1900,6 +1929,26 @@ class MainWindow(QMainWindow):
             self.show_error(f'Clear all memory failed: {exc}')
             QMessageBox.critical(self, 'Clear All Memory', f'Failed: {exc}')
 
+    def clear_finder_memory(self) -> None:
+        if QMessageBox.question(
+            self,
+            'Clear Finder Memory',
+            'Forget which transcript chunks have already been processed? Existing extracted memories will be kept, and all available transcripts can be processed again.',
+        ) != QMessageBox.Yes:
+            return
+        was_monitoring = self.worker_thread is not None
+        try:
+            self.stop_watch()
+            deleted, snapshot = self.db.clear_finder_memory()
+            self.refresh_all()
+            self.append_log(f'Cleared finder memory ({deleted} processed chunks). Backup snapshot: {snapshot}')
+            QMessageBox.information(self, 'Finder Memory Cleared', f'Forgot {deleted} processed transcript chunks. Existing memories were preserved.\n\nBackup: {snapshot}')
+            if was_monitoring:
+                self.start_watch(silent=True)
+        except Exception as exc:
+            self.show_error(f'Clear finder memory failed: {exc}')
+            QMessageBox.critical(self, 'Clear Finder Memory', f'Failed: {exc}')
+
     def closeEvent(self, event) -> None:
         self.save_settings(); self.settings.set('window_geometry', base64.b64encode(bytes(self.saveGeometry())).decode('ascii'))
         if self.tray_icon and not self.force_quit:
@@ -1916,22 +1965,34 @@ def main() -> int:
     RUNTIME_BACKUP_ROOT = Path(args.backup_root).expanduser().resolve() if args.backup_root else DEFAULT_BACKUP_ROOT
     app = QApplication(sys.argv); app.setApplicationName('LIFELINE Memory Manager')
     app.setQuitOnLastWindowClosed(False)
-    global _INSTANCE_GUARD
-    instance_guard = QSharedMemory("LIFELINE_MEMORY_MANAGER_SINGLE_INSTANCE_GUARD")
-    if not instance_guard.create(1):
-        if instance_guard.error() == QSharedMemory.SharedMemoryError.AlreadyExists:
-            message = "Another LIFELINE Memory Manager instance is already running."
-            if not args.auto_start:
-                QMessageBox.information(None, "LIFELINE Memory Manager already running", message)
-            else:
-                print(f"[INFO] {message}")
-            return 0
-        print(f"[WARN] LIFELINE Memory Manager single-instance guard unavailable: {instance_guard.errorString()}")
-    _INSTANCE_GUARD = instance_guard
+    global _INSTANCE_SERVER
+    replacement = QLocalSocket()
+    replacement.connectToServer(INSTANCE_SERVER_NAME)
+    if replacement.waitForConnected(500):
+        replacement.write(b"replace")
+        replacement.flush()
+        replacement.waitForBytesWritten(500)
+        replacement.waitForDisconnected(3000)
+    QLocalServer.removeServer(INSTANCE_SERVER_NAME)
+    instance_server = QLocalServer(app)
+    if not instance_server.listen(INSTANCE_SERVER_NAME):
+        print(f"[WARN] LIFELINE Memory Manager replacement server unavailable: {instance_server.errorString()}")
+
+    def close_replaced_instance() -> None:
+        while instance_server.hasPendingConnections():
+            socket = instance_server.nextPendingConnection()
+            socket.disconnectFromServer()
+        for window in QApplication.topLevelWidgets():
+            if isinstance(window, MainWindow):
+                window.force_quit = True
+                window.close()
+        app.quit()
+
+    instance_server.newConnection.connect(close_replaced_instance)
+    _INSTANCE_SERVER = instance_server
 
     w = MainWindow()
     if args.auto_start:
-        QTimer.singleShot(500, w.start_watch)
         if w.tray_icon:
             QTimer.singleShot(800, w.hide_to_tray)
         else:
