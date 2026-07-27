@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.0
+// @version      1.2.1
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -23,6 +23,7 @@
   const TOKEN_KEY = 'lifeline.githubFineGrainedToken';
   const CAPTURE_RETRY_MS = 3000;
   const CAPTURE_INTERVAL_MS = 60000;
+  const WRITE_CONFLICT_RETRIES = 4;
   const THREE_DOT_PATH = 'M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3m5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3m5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3';
   const TRANSCRIPT_ICON_PATH = 'M3 20l1.3 -3.9c-2.324 -3.437 -1.426 -7.872 2.1 -10.374c3.526 -2.501 8.59 -2.296 11.845 .48c3.255 2.777 3.695 7.266 1.029 10.501c-2.666 3.235 -7.615 4.215 -11.574 2.293l-4.7 1';
   const PAGE_NOISE = new Set(['voice call', 'message from you', 'kindroid - your personal artificial intelligence companion']);
@@ -61,9 +62,12 @@
     return { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' };
   }
 
-  function contentUrl(repoPath, includeRef = true) {
+  function contentUrl(repoPath, includeRef = true, cacheBuster = '') {
     const encoded = repoPath.split('/').map(encodeURIComponent).join('/');
-    return `https://api.github.com/repos/${BRIDGE_OWNER}/${BRIDGE_REPO}/contents/${encoded}${includeRef ? `?ref=${BRIDGE_BRANCH}` : ''}`;
+    const query = [];
+    if (includeRef) query.push(`ref=${encodeURIComponent(BRIDGE_BRANCH)}`);
+    if (cacheBuster) query.push(`lifeline_cache=${encodeURIComponent(cacheBuster)}`);
+    return `https://api.github.com/repos/${BRIDGE_OWNER}/${BRIDGE_REPO}/contents/${encoded}${query.length ? `?${query.join('&')}` : ''}`;
   }
 
   function parseGithubResponse(response, action) {
@@ -89,8 +93,16 @@
     return btoa(binary);
   }
 
-  async function readTranscript(token, repoPath) {
-    const response = await request({ method: 'GET', url: contentUrl(repoPath), headers: githubHeaders(token) });
+  async function readTranscript(token, repoPath, attempt = 0) {
+    // A stale Contents API response supplies an obsolete blob SHA and makes the
+    // following PUT fail with "<path> does not match <sha>". Every optimistic
+    // retry must therefore bypass both the browser and intermediary caches.
+    const cacheBuster = `${Date.now()}-${attempt}-${Math.random().toString(36).slice(2)}`;
+    const response = await request({
+      method: 'GET',
+      url: contentUrl(repoPath, true, cacheBuster),
+      headers: { ...githubHeaders(token), 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+    });
     if (response.status === 404) return { sha: '', doc: null };
     const file = parseGithubResponse(response, 'Reading the bridge transcript');
     try { return { sha: file.sha || '', doc: JSON.parse(decodeBase64Utf8(file.content)) }; }
@@ -116,6 +128,11 @@
       data: JSON.stringify({ message: `Update group transcript ${doc.group_id}`, branch: BRIDGE_BRANCH, content: encodeBase64Utf8(JSON.stringify(doc, null, 2)), ...(sha ? { sha } : {}) }),
     });
     return parseGithubResponse(response, 'Saving the bridge transcript');
+  }
+
+  function isWriteConflict(error) {
+    return error?.status === 409
+      || (error?.status === 422 && /does not match|sha/i.test(String(error.message || '')));
   }
 
   function transcriptEntries(doc) {
@@ -148,19 +165,26 @@
 
   async function saveMerged(token, id, bubbles) {
     const repoPath = `transcripts/${id}/transcript.json`;
-    let current = await readTranscript(token, repoPath);
+    let current = await readTranscript(token, repoPath, 0);
     const currentParticipants = Array.isArray(current.doc?.participants) ? current.doc.participants.map(normalizeText).filter(Boolean) : [];
     const configuredParticipants = currentParticipants.length ? [] : await readGroupmakerParticipants(token, id);
     let merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
     if (!merged.changed) return { ...merged, repoPath };
-    try { await writeTranscript(token, repoPath, merged.doc, current.sha); }
-    catch (error) {
-      if (error.status !== 409) throw error;
-      current = await readTranscript(token, repoPath);
-      merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
-      if (merged.changed) await writeTranscript(token, repoPath, merged.doc, current.sha);
+
+    for (let attempt = 0; attempt <= WRITE_CONFLICT_RETRIES; attempt += 1) {
+      try {
+        await writeTranscript(token, repoPath, merged.doc, current.sha);
+        return { ...merged, repoPath };
+      } catch (error) {
+        if (!isWriteConflict(error) || attempt === WRITE_CONFLICT_RETRIES) throw error;
+        await sleep(250 * (attempt + 1));
+        current = await readTranscript(token, repoPath, attempt + 1);
+        merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
+        // Another writer may already have saved exactly these entries.
+        if (!merged.changed) return { ...merged, repoPath };
+      }
     }
-    return { ...merged, repoPath };
+    throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
   function clickElement(element) {
