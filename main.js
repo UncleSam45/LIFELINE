@@ -34,11 +34,14 @@ const LEGACY_BRIDGE_PATHS = ['config.backup.json', 'kindroidxl_directory/config.
 const TOKEN_STORAGE_KEY = 'lifeline.bridge.accessKey';
 const REMEMBER_STORAGE_KEY = 'lifeline.bridge.rememberAccessKey';
 const KINDROID_API_KEY_STORAGE_KEY = 'lifeline.kindroid.apiKey';
+const WEATHER_API_KEY_STORAGE_KEY = 'lifeline.weather.apiKey';
+const WEATHER_API_URL = 'https://api.weatherapi.com/v1/forecast.json';
 const KINDROID_BASE_URL = 'https://api.kindroid.ai/v1';
 const GROUPMAKER_REQUESTER = 'LIFELINE-MAINJS-GROUPMAKER';
 const PHONE_CALL_DIRECTIVE = 'This is a phone call. Respond in direct speech only. Avoid action or inner thought narration. Keep it concise.';
 const REMEMBERED_ACCESS_KEY = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
 const REMEMBERED_KINDROID_API_KEY = localStorage.getItem(KINDROID_API_KEY_STORAGE_KEY) || '';
+const REMEMBERED_WEATHER_API_KEY = localStorage.getItem(WEATHER_API_KEY_STORAGE_KEY) || '';
 const REMEMBERED_KINDROID_CONNECTED = REMEMBERED_KINDROID_API_KEY.trim().startsWith('kn_');
 const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true' && Boolean(REMEMBERED_ACCESS_KEY.trim());
 let groupmakerDraftSaveTimer = null;
@@ -113,6 +116,11 @@ const state = {
   saving: false,
   kindroidApiKey: REMEMBERED_KINDROID_API_KEY,
   kindroidConnected: REMEMBERED_KINDROID_CONNECTED,
+  weatherApiKey: REMEMBERED_WEATHER_API_KEY,
+  weatherOpen: false,
+  weatherBusy: false,
+  weatherError: '',
+  weatherData: null,
   groupmakerOpen: true,
   groupmakerMinimized: false,
   groupmakerBusy: false,
@@ -994,16 +1002,58 @@ function endGithubSession(detail) {
   document.querySelector('#access-key')?.focus();
 }
 
+function weatherIconUrl(value) {
+  const url = String(value || '').trim();
+  return url.startsWith('//') ? `https:${url}` : url;
+}
+
+function formatWeatherDay(value, options) {
+  const date = new Date(`${value}T12:00:00`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, options);
+}
+
+function renderWeatherAutomation() {
+  const weather = state.weatherData;
+  const current = weather?.current;
+  const location = weather?.location;
+  const forecast = Array.isArray(weather?.forecast?.forecastday) ? weather.forecast.forecastday : [];
+  const credentialLabel = state.weatherApiKey ? 'Credential saved on this device' : 'API key required';
+  return `<section class="weather-automation"><button id="weather-back" class="weather-back ghost" type="button">← All automations</button><header class="weather-hero"><div><span class="weather-kicker">HEARTBEAT · WEATHER</span><h1>Montréal,<br><em>right now.</em></h1><p>Current conditions and the week ahead, delivered on demand.</p></div><div class="weather-orb" aria-hidden="true"><span>☀</span></div></header><section class="weather-controls"><div class="weather-key-copy"><span class="weather-lock">◆</span><div><b>WeatherAPI credential</b><small>${escapeHtml(credentialLabel)}</small></div></div><label class="weather-key-field"><span>API KEY</span><input id="weather-api-key" type="password" value="${escapeHtml(state.weatherApiKey)}" placeholder="Paste your WeatherAPI key" autocomplete="off" spellcheck="false"></label><div class="weather-actions"><button id="weather-fetch" type="button" ${state.weatherBusy ? 'disabled' : ''}>${state.weatherBusy ? 'FETCHING WEATHER…' : state.weatherApiKey ? 'REFRESH MONTRÉAL' : 'SAVE & FETCH'}</button>${state.weatherApiKey ? '<button id="weather-forget" class="ghost" type="button">FORGET KEY</button>' : ''}</div></section>${state.weatherError ? `<div class="weather-message weather-error" role="alert"><b>Weather unavailable</b><span>${escapeHtml(state.weatherError)}</span></div>` : ''}${current ? `<section class="weather-current"><div class="weather-current-main"><img src="${escapeHtml(weatherIconUrl(current.condition?.icon))}" alt=""><div><span>${escapeHtml(location?.name || 'Montreal')}, ${escapeHtml(location?.region || 'Quebec')}</span><strong>${Math.round(Number(current.temp_c))}°</strong><p>${escapeHtml(current.condition?.text || 'Current conditions')}</p></div></div><dl><div><dt>FEELS LIKE</dt><dd>${Math.round(Number(current.feelslike_c))}°</dd></div><div><dt>WIND</dt><dd>${Math.round(Number(current.wind_kph))} km/h</dd></div><div><dt>HUMIDITY</dt><dd>${Math.round(Number(current.humidity))}%</dd></div><div><dt>UPDATED</dt><dd>${escapeHtml(current.last_updated?.split(' ')[1] || 'Now')}</dd></div></dl></section><section class="weather-week"><div class="weather-section-head"><div><span>7-DAY OUTLOOK</span><h2>The week ahead</h2></div><small>Local time · ${escapeHtml(location?.localtime || '')}</small></div><div class="weather-days">${forecast.map((day, index) => `<article class="weather-day ${index === 0 ? 'today' : ''}"><span>${index === 0 ? 'TODAY' : escapeHtml(formatWeatherDay(day.date, { weekday: 'short' }).toUpperCase())}</span><img src="${escapeHtml(weatherIconUrl(day.day?.condition?.icon))}" alt=""><b>${Math.round(Number(day.day?.maxtemp_c))}°</b><small>${Math.round(Number(day.day?.mintemp_c))}°</small><p>${escapeHtml(day.day?.condition?.text || '')}</p><i><span style="width:${Math.min(100, Math.max(0, Number(day.day?.daily_chance_of_rain || 0)))}%"></span></i><em>${Math.round(Number(day.day?.daily_chance_of_rain || 0))}% rain</em></article>`).join('')}</div></section>` : `<section class="weather-welcome"><span aria-hidden="true">☁</span><div><h2>Your forecast is one click away</h2><p>Add your WeatherAPI key above. It stays in this browser and is only sent to WeatherAPI when you request Montréal weather.</p></div></section>`}</section>`;
+}
+
+async function fetchMontrealWeather() {
+  const key = document.querySelector('#weather-api-key')?.value.trim() || state.weatherApiKey;
+  if (!key) { state.weatherError = 'Enter your WeatherAPI key to continue.'; render(); return; }
+  state.weatherApiKey = key;
+  localStorage.setItem(WEATHER_API_KEY_STORAGE_KEY, key);
+  state.weatherBusy = true;
+  state.weatherError = '';
+  render();
+  try {
+    const params = new URLSearchParams({ key, q: 'Montreal', days: '7', aqi: 'no', alerts: 'no' });
+    const response = await fetch(`${WEATHER_API_URL}?${params.toString()}`, { headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error?.message || `WeatherAPI returned HTTP ${response.status}.`);
+    state.weatherData = payload;
+  } catch (error) {
+    state.weatherError = error instanceof TypeError ? 'Could not reach WeatherAPI. Check your connection and try again.' : String(error?.message || error);
+  } finally {
+    state.weatherBusy = false;
+    render();
+  }
+}
+
 function renderHeartbeatView() {
+  if (state.weatherOpen) return renderWeatherAutomation();
   const items = heartbeatEntries().slice().sort((a, b) => String(a.scheduled_at || '').localeCompare(String(b.scheduled_at || '')));
   const completedCount = items.filter((entry) => entry.completed).length;
   const scheduledCount = items.length - completedCount;
   const rows = items.map((entry, index) => {
     const scheduled = entry.scheduled_at ? new Date(entry.scheduled_at) : null;
     const date = scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Any time';
-    return `<article class="heartbeat-item ${entry.completed ? 'completed' : ''}"><span class="heartbeat-order">${String(index + 1).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'Details will be added soon.')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small><i aria-hidden="true"></i>${entry.completed ? 'Completed' : 'Scheduled'}</small></span></article>`;
+    return `<article class="heartbeat-item ${entry.completed ? 'completed' : ''}"><span class="heartbeat-order">${String(index + 2).padStart(2, '0')}</span><span class="heartbeat-copy"><strong>${escapeHtml(entry.title || 'Untitled operation')}</strong><small>${escapeHtml(entry.description || 'Details will be added soon.')}</small></span><span class="heartbeat-time"><b>${escapeHtml(date)}</b><small><i aria-hidden="true"></i>${entry.completed ? 'Completed' : 'Scheduled'}</small></span></article>`;
   }).join('');
-  return `<section class="heartbeat-home"><header class="heartbeat-banner"><div class="heartbeat-signal" aria-hidden="true"><span class="signal-grid"></span><svg viewBox="0 0 1000 240" preserveAspectRatio="none"><defs><linearGradient id="heartbeat-line" x1="0" x2="1"><stop stop-color="#ff5f87"/><stop offset=".52" stop-color="#ff9bb4"/><stop offset="1" stop-color="#69e5ff"/></linearGradient><filter id="heartbeat-glow"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="signal-shadow" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/><path class="signal-line" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/></svg></div><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><div class="heartbeat-live"><i aria-hidden="true"></i> SYSTEM ONLINE</div><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>A clear, dependable view of every scheduled operation.</p></div><div class="heartbeat-vitals" aria-label="Heartbeat summary"><div><strong>${String(items.length).padStart(2, '0')}</strong><span>Total</span></div><div><strong>${String(scheduledCount).padStart(2, '0')}</strong><span>Scheduled</span></div><div><strong>${String(completedCount).padStart(2, '0')}</strong><span>Complete</span></div></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">OPERATION QUEUE</p><h2>Current schedule</h2><p>Entries are managed by LIFELINE and shown here as a read-only feed.</p></div><span class="heartbeat-readonly"><i aria-hidden="true">◇</i> Read only</span></div><div class="heartbeat-list">${rows || '<div class="heartbeat-empty"><span aria-hidden="true">♡</span><h3>All quiet</h3><p>No operations are scheduled right now.</p></div>'}</div></section></section>`;
+  return `<section class="heartbeat-home"><header class="heartbeat-banner"><div class="heartbeat-signal" aria-hidden="true"><span class="signal-grid"></span><svg viewBox="0 0 1000 240" preserveAspectRatio="none"><defs><linearGradient id="heartbeat-line" x1="0" x2="1"><stop stop-color="#ff5f87"/><stop offset=".52" stop-color="#ff9bb4"/><stop offset="1" stop-color="#69e5ff"/></linearGradient><filter id="heartbeat-glow"><feGaussianBlur stdDeviation="6" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><path class="signal-shadow" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/><path class="signal-line" d="M0 130 H250 L280 112 L315 130 H390 L420 80 L452 190 L500 25 L550 152 L580 130 H690 L720 108 L755 130 H1000"/></svg></div><div class="heartbeat-banner-shade"></div><div class="heartbeat-banner-copy"><div class="heartbeat-live"><i aria-hidden="true"></i> SYSTEM ONLINE</div><p class="eyebrow">LIFELINE OPERATIONS</p><h1>HEARTBEAT</h1><p>A clear, dependable view of every scheduled operation.</p></div><div class="heartbeat-vitals" aria-label="Heartbeat summary"><div><strong>${String(items.length + 1).padStart(2, '0')}</strong><span>Total</span></div><div><strong>${String(scheduledCount).padStart(2, '0')}</strong><span>Scheduled</span></div><div><strong>${String(completedCount).padStart(2, '0')}</strong><span>Complete</span></div></div></header><section class="heartbeat-board"><div class="heartbeat-board-head"><div><p class="eyebrow">AUTOMATIONS</p><h2>Available entries</h2><p>Open an automation to configure it and run it on demand.</p></div><span class="heartbeat-readonly"><i aria-hidden="true">◇</i> Heartbeat</span></div><div class="heartbeat-list"><button id="weather-automation" class="heartbeat-item heartbeat-automation" type="button"><span class="heartbeat-order weather-order">☀</span><span class="heartbeat-copy"><strong>Weather</strong><small>Current Montréal weather and a seven-day forecast.</small></span><span class="heartbeat-time"><b>On demand</b><small><i aria-hidden="true"></i>${state.weatherApiKey ? 'Ready' : 'Setup required'}</small></span></button>${rows}</div></section></section>`;
 }
 
 function renderDirectoryWorkspace(current, onlineLabel) {
@@ -1341,6 +1391,17 @@ function bindDirectoryEvents() {
   document.querySelector('#filter').value = state.filter;
   document.querySelector('#world-view')?.addEventListener('click', () => { state.activeView = 'world'; render(); });
   document.querySelector('#directory-view')?.addEventListener('click', () => { state.activeView = 'directory'; render(); });
+  document.querySelector('#weather-automation')?.addEventListener('click', () => { state.weatherOpen = true; render(); });
+  document.querySelector('#weather-back')?.addEventListener('click', () => { state.weatherOpen = false; state.weatherError = ''; render(); });
+  document.querySelector('#weather-fetch')?.addEventListener('click', fetchMontrealWeather);
+  document.querySelector('#weather-api-key')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') fetchMontrealWeather(); });
+  document.querySelector('#weather-forget')?.addEventListener('click', () => {
+    localStorage.removeItem(WEATHER_API_KEY_STORAGE_KEY);
+    state.weatherApiKey = '';
+    state.weatherData = null;
+    state.weatherError = '';
+    render();
+  });
   document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
   document.querySelectorAll('.person').forEach((button) => button.addEventListener('click', () => { state.selectedUid = button.dataset.uid; state.activeView = 'directory'; state.activeEntryTab = 'profile'; render(); }));
