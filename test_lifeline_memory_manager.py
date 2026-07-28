@@ -19,6 +19,14 @@ from lifeline_memory_manager import (
 
 
 class BridgeBackupTests(unittest.TestCase):
+    @patch.object(GitHubBridge, "read_bytes")
+    @patch.object(GitHubBridge, "write_bytes", return_value="ab1891c9f4b427ab75fb1123c6dc24e211ca4885")
+    def test_bridge_upload_uses_accepted_blob_sha_without_stale_readback(self, write_bytes, read_bytes) -> None:
+        bridge = GitHubBridge("token")
+        bridge.write_and_verify_bytes("memory/latest.db", b"database", "backup")
+        write_bytes.assert_called_once_with("memory/latest.db", b"database", "backup")
+        read_bytes.assert_not_called()
+
     @patch.object(GitHubBridge, "read_bytes", return_value=(b"database", "sha"))
     @patch.object(GitHubBridge, "write_bytes")
     def test_bridge_upload_is_read_back_and_verified(self, write_bytes, read_bytes) -> None:
@@ -43,6 +51,19 @@ class BridgeBackupTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("token", detail)
             self.assertNotEqual(db.last_bridge_check, "never")
+
+    def test_worker_backup_failure_is_logged_without_worker_error(self) -> None:
+        worker = ProcessingWorker.__new__(ProcessingWorker)
+        worker.db = Mock()
+        worker.db.checked_bridge_backup.return_value = (False, "write access denied")
+        worker.log = Mock()
+        worker.error = Mock()
+
+        worker.backup_bridge_database()
+
+        worker.log.emit.assert_called_once()
+        self.assertIn("monitoring continues", worker.log.emit.call_args.args[0])
+        worker.error.emit.assert_not_called()
 
 
 class WorkerTestCase(unittest.TestCase):
