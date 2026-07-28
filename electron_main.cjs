@@ -11,7 +11,9 @@ const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
 const KINDROID_HOME_URL = 'https://kindroid.ai/';
-const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'kindroid-call-toolkit.js'), 'utf8');
+// The same standalone userscript is injected by Electron and installed directly
+// in Tampermonkey, keeping a single source of truth for the call-page UI.
+const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8');
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 

@@ -2,9 +2,9 @@
 
 ## Call message toolkit
 
-`kindroid-call-toolkit.js` is the shared call-page toolkit used by Electron and Tampermonkey. On Kindroid call pages it mounts a floating panel at the middle-left of the screen. Pressing Enter in its text area sends the text through the visible Kindroid composer, automatically enclosed in asterisks; Shift+Enter creates a new line. It also provides one-click `*CONTINUES CONVERSATION*` and `*SAM PHYSICALLY ENTERS THE ROOM*` presets.
+`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Messages are sent exactly as saved, so OOC directives and roleplay asterisks are both supported.
 
-For Tampermonkey, install `lifeline-kindroid-call-toolkit.user.js` in the same way as any userscript. Its `@require` loads the shared toolkit implementation, so Electron and browser installations use identical composer detection and sending behavior. If installing from a different branch or fork, change the `@require` URL to that raw `kindroid-call-toolkit.js` file.
+For Tampermonkey, create a new script and paste the complete contents of `lifeline-kindroid-call-toolkit.user.js`, or install that raw file directly. It has no external `@require`; the metadata and complete implementation live in the same valid userscript file.
 
 ## Transcript bridge
 
