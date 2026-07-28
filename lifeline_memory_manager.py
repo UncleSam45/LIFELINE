@@ -219,6 +219,7 @@ NON_PERSON_SUBJECTS = {
 MAX_CONTEXT_REMINDERS_PER_CHUNK = 1
 MAX_MEMORIES_PER_CHUNK = 5
 CONTEXT_REMINDER_COOLDOWN_SECONDS = 3600
+CONTEXT_REMINDER_ACTIVITY_WINDOW_SECONDS = 5 * 60
 KINDROID_API_BASE_URL = "https://api.kindroid.ai/v1"
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -1270,6 +1271,10 @@ class ProcessingWorker(QObject):
         self.remote_participants: Dict[str, List[str]] = {}
         self.remote_group_ids: Dict[str, str] = {}
         self.remote_ai_ids: Dict[str, List[str]] = {}
+        # Memory extraction may legitimately lag behind transcript intake. Keep
+        # the intake time separate so delayed chunks still become memories but
+        # cannot produce realtime context reminders after activity has stopped.
+        self.last_incoming_transcript_at: Dict[str, float] = {}
         self.next_ollama_retry = 0.0
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
         self.bridge = GitHubBridge(github_token); self.next_bridge_sync = 0.0; self.next_bridge_backup = time.time() + 120
@@ -1315,6 +1320,7 @@ class ProcessingWorker(QObject):
             new_entries = entries[old_count:]
             self.remote_entry_counts[source] = len(entries)
             if new_entries:
+                self.last_incoming_transcript_at[source] = time.time()
                 text = "\n".join(new_entries)
                 self.buffer.add(source, text)
                 participant_text = ", ".join(participants) or "none listed"
@@ -1358,6 +1364,10 @@ class ProcessingWorker(QObject):
         group_id = next((self.remote_group_ids.get(consumed_source, "") for consumed_source in consumed if self.remote_group_ids.get(consumed_source, "")), "")
         ai_list = next((self.remote_ai_ids.get(consumed_source, []) for consumed_source in consumed), [])
         session: Dict[str, Any] = {"group_id": group_id, "names": group_people, "ai_list": ai_list}
+        last_incoming_at = max(
+            (self.last_incoming_transcript_at.get(consumed_source, 0.0) for consumed_source in consumed),
+            default=0.0,
+        )
         client = OllamaClient(ollama_url, self.settings.get('ollama_model'))
         extractor = MemoryExtractor(self.settings.float('confidence_threshold'))
         prompt = extractor.prompt(chunk, group_people); self.output.emit('Prompt Sent', prompt); self.status.emit('Processing')
@@ -1369,15 +1379,29 @@ class ProcessingWorker(QObject):
             for job in jobs:
                 self.clean_job(job)
             self.log.emit(f"Stored and cleaned chunk from {source}; memories={len(memories)}; cleanup_jobs={len(jobs)}")
-            self.send_context_reminders(source, chunk, session)
+            self.send_context_reminders(source, chunk, session, last_incoming_at=last_incoming_at)
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
         except Exception as e:
             self.buffer.add(source, chunk)
             self.error.emit(f"Processing failed; GitHub transcript retained in memory for retry: {e}"); self.status.emit('Error')
 
-    def send_context_reminders(self, source: str, chunk: str, session: Dict[str, Any] | None = None) -> None:
+    def send_context_reminders(
+        self,
+        source: str,
+        chunk: str,
+        session: Dict[str, Any] | None = None,
+        last_incoming_at: float = 0.0,
+    ) -> None:
         if self.settings.get('context_reminders_enabled').strip().lower() in {"0", "false", "no", "off"}:
             self.log.emit("Context reminder skipped: disabled by settings.")
+            return
+        activity_age = time.time() - last_incoming_at
+        if last_incoming_at <= 0 or activity_age > CONTEXT_REMINDER_ACTIVITY_WINDOW_SECONDS:
+            age_detail = f"{activity_age:.0f} seconds ago" if last_incoming_at > 0 else "unknown"
+            self.log.emit(
+                "Context reminder skipped: no incoming transcript activity within the last "
+                f"5 minutes (last intake: {age_detail}). Memory extraction and storage were still completed."
+            )
             return
         session = session or _load_groupmaker_session_for_sources(source)
         group_id = str(session.get("group_id", "")).strip()
