@@ -19,6 +19,14 @@ from lifeline_memory_manager import (
 
 
 class BridgeBackupTests(unittest.TestCase):
+    @patch.object(GitHubBridge, "read_bytes")
+    @patch.object(GitHubBridge, "write_bytes", return_value="ab1891c9f4b427ab75fb1123c6dc24e211ca4885")
+    def test_bridge_upload_uses_accepted_blob_sha_without_stale_readback(self, write_bytes, read_bytes) -> None:
+        bridge = GitHubBridge("token")
+        bridge.write_and_verify_bytes("memory/latest.db", b"database", "backup")
+        write_bytes.assert_called_once_with("memory/latest.db", b"database", "backup")
+        read_bytes.assert_not_called()
+
     @patch.object(GitHubBridge, "read_bytes", return_value=(b"database", "sha"))
     @patch.object(GitHubBridge, "write_bytes")
     def test_bridge_upload_is_read_back_and_verified(self, write_bytes, read_bytes) -> None:
@@ -43,6 +51,19 @@ class BridgeBackupTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("token", detail)
             self.assertNotEqual(db.last_bridge_check, "never")
+
+    def test_worker_backup_failure_is_logged_without_worker_error(self) -> None:
+        worker = ProcessingWorker.__new__(ProcessingWorker)
+        worker.db = Mock()
+        worker.db.checked_bridge_backup.return_value = (False, "write access denied")
+        worker.log = Mock()
+        worker.error = Mock()
+
+        worker.backup_bridge_database()
+
+        worker.log.emit.assert_called_once()
+        self.assertIn("monitoring continues", worker.log.emit.call_args.args[0])
+        worker.error.emit.assert_not_called()
 
 
 class WorkerTestCase(unittest.TestCase):
@@ -144,6 +165,7 @@ class SituationRecapTests(WorkerTestCase):
     def test_recap_is_separate_llm_call_and_sent_to_group_and_people(self, group_send, direct_send) -> None:
         worker = self.make_worker()
         worker.db.situation_recap_due.return_value = True
+        worker.db.claim_situation_recap.return_value = 42
         worker.db.updated_keyword_memories.return_value = [{
             "person": "KIN", "keyword": "launch", "active_summary": "Kin launched it.",
             "updated_at": "2026-07-28T10:00:00",
@@ -158,10 +180,7 @@ class SituationRecapTests(WorkerTestCase):
         self.assertIn("separate recap task", client.generate.call_args.args[0])
         group_send.assert_called_once_with("group", "SITUATION RECAP", "Kin launched it.")
         self.assertEqual(direct_send.call_count, 2)
-        worker.db.record_situation_recap.assert_called_once_with(
-            "group", ["Kin", "Nova"], "Kin launched it.",
-            "transcripts/group/transcript.json", True, 2,
-        )
+        worker.db.complete_situation_recap.assert_called_once_with(42, "Kin launched it.", True, 2)
 
     def test_prompt_rejects_invention_and_database_language(self) -> None:
         prompt = SituationRecapComposer.prompt([{
@@ -182,6 +201,15 @@ class RecapPersistenceTests(unittest.TestCase):
             db.record_situation_recap("group-a", ["Kin"], "Recap", "source", True, 1)
             self.assertFalse(db.situation_recap_due("group-a"))
             self.assertTrue(db.situation_recap_due("group-b"))
+
+    def test_recap_claim_is_atomic_for_an_hour(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = MemoryDB(root / "memory.db", root / "backups")
+            first = db.claim_situation_recap("group-a", ["Kin"], "source")
+            second = db.claim_situation_recap("group-a", ["Kin"], "source")
+            self.assertGreater(first, 0)
+            self.assertEqual(second, 0)
 
 
 class TelemetryOutputTests(unittest.TestCase):

@@ -183,19 +183,29 @@ class GitHubBridge:
         content = str(payload.get("content") or "").replace("\n", "")
         return (base64.b64decode(content) if content else b""), str(payload.get("sha") or "")
 
-    def write_bytes(self, path: str, data: bytes, message: str) -> None:
+    def write_bytes(self, path: str, data: bytes, message: str) -> str:
         if not self.enabled:
-            return
+            return ""
         _old, sha = self.read_bytes(path)
         body = {"message": message, "branch": BRIDGE_BRANCH, "content": base64.b64encode(data).decode("ascii")}
         if sha:
             body["sha"] = sha
         response = requests.put(self._url(path, ref=False), headers=self._headers(), json=body, timeout=45)
         response.raise_for_status()
+        payload = response.json()
+        return str(payload.get("content", {}).get("sha") or "")
+
+    @staticmethod
+    def _git_blob_sha(data: bytes) -> str:
+        """Return the object ID GitHub assigns to an uploaded file payload."""
+        header = f"blob {len(data)}\0".encode("ascii")
+        return hashlib.sha1(header + data).hexdigest()
 
     def write_and_verify_bytes(self, path: str, data: bytes, message: str) -> None:
-        """Upload bytes and prove that the bridge now returns the same payload."""
-        self.write_bytes(path, data, message)
+        """Upload bytes and verify the accepted blob without relying on a stale ref read."""
+        uploaded_sha = self.write_bytes(path, data, message)
+        if uploaded_sha and uploaded_sha == self._git_blob_sha(data):
+            return
         remote_data, _sha = self.read_bytes(path)
         if hashlib.sha256(remote_data).digest() != hashlib.sha256(data).digest():
             raise RuntimeError(f"GitHub bridge verification failed for {path}")
@@ -843,6 +853,35 @@ class MemoryDB:
             ).fetchone()
         return row is None
 
+    def claim_situation_recap(self, group_id: str, participants: Iterable[str], source_file: str) -> int:
+        """Atomically reserve the hourly recap slot across workers and app instances."""
+        if not group_id:
+            return 0
+        cutoff = (_dt.datetime.now() - _dt.timedelta(seconds=SITUATION_RECAP_INTERVAL_SECONDS)).replace(microsecond=0).isoformat()
+        with self.lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            recent = conn.execute(
+                "SELECT 1 FROM situation_recaps WHERE group_id=? AND created_at>=? LIMIT 1",
+                (group_id, cutoff),
+            ).fetchone()
+            if recent:
+                return 0
+            cursor = conn.execute(
+                "INSERT INTO situation_recaps(group_id,participants,recap,source_file,created_at,group_sent,direct_sent) "
+                "VALUES(?,?,?,?,?,0,0)",
+                (group_id, json.dumps(list(participants)), "", source_file, now_iso()),
+            )
+            return int(cursor.lastrowid)
+
+    def complete_situation_recap(self, recap_id: int, recap: str, group_sent: bool, direct_sent: int) -> None:
+        """Complete a previously claimed recap slot after generation and delivery."""
+        with self.lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE situation_recaps SET recap=?,group_sent=?,direct_sent=? WHERE id=?",
+                (recap, int(group_sent), direct_sent, recap_id),
+            )
+            self._mark_changed(conn, "complete_situation_recap")
+
     def record_situation_recap(
         self, group_id: str, participants: Iterable[str], recap: str, source_file: str,
         group_sent: bool, direct_sent: int,
@@ -1446,6 +1485,14 @@ class ProcessingWorker(QObject):
         self.stop_flag.set()
         self.status.emit("Idle")
 
+    def backup_bridge_database(self) -> None:
+        """Attempt the optional remote backup without interrupting memory processing."""
+        ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
+        if ok:
+            self.log.emit("Memory database bridge backup uploaded and verified")
+        else:
+            self.log.emit(f"Memory database bridge backup unavailable; monitoring continues: {detail}")
+
     def loop(self) -> None:
         idle = self.settings.int('idle_timeout')
         while not self.stop_flag.is_set():
@@ -1459,11 +1506,7 @@ class ProcessingWorker(QObject):
                 except Exception as exc: self.error.emit(f"GitHub transcript poll failed: {exc}")
                 self.next_bridge_sync = now_ts + 60
             if now_ts >= self.next_bridge_backup:
-                ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
-                if ok:
-                    self.log.emit("Memory database bridge backup uploaded and verified")
-                else:
-                    self.error.emit(f"Memory database bridge backup FAILED: {detail}")
+                self.backup_bridge_database()
                 self.next_bridge_backup = now_ts + BRIDGE_BACKUP_INTERVAL_SECONDS
             self.monitor.emit({"buffered": self.buffer.size, "pending": len(self.buffer.items), "files": len(self.remote_entry_counts)})
         self.stop()
@@ -1670,6 +1713,10 @@ class ProcessingWorker(QObject):
         if not memories:
             self.log.emit("Situation recap skipped: no memory keywords were updated in the last 24 hours.")
             return
+        recap_id = self.db.claim_situation_recap(group_id, participants, source)
+        if not recap_id:
+            self.log.emit(f"Situation recap throttled for group {group_id}: one was produced within the last hour.")
+            return
 
         prompt = SituationRecapComposer.prompt(memories, participants)
         self.output.emit("Situation Recap Prompt", prompt)
@@ -1694,7 +1741,7 @@ class ProcessingWorker(QObject):
                 self.log.emit(f"Situation recap delivery failed for {str(name).strip()} ({ai_id}): {status}")
         # A generated recap counts toward the interval even if a downstream API
         # delivery fails, preventing every transcript from causing another LLM call.
-        self.db.record_situation_recap(group_id, participants, recap, source, group_ok, direct_sent)
+        self.db.complete_situation_recap(recap_id, recap, group_ok, direct_sent)
         self.log.emit(
             f"Situation recap produced for group {group_id}: memory_updates={len(memories)}; "
             f"group_sent={int(group_ok)} ({group_status}); personal_sent={direct_sent}; "
@@ -2144,7 +2191,7 @@ class MainWindow(QMainWindow):
                 self.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
                 self.status_label.setText('GitHub token required')
                 return
-            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read and write access to the bridge repository.')
+            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository. Write access is optional and only used for database backups.')
             self.github_token.setFocus(); return
         self.save_settings();
         if self.worker_thread: return
@@ -2157,15 +2204,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'GitHub access failed', f'The token could not access {BRIDGE_OWNER}/{BRIDGE_REPO}.\n\n{exc}')
             return
         self.db.bridge = GitHubBridge(token)
-        backup_ok, backup_detail = self.db.checked_bridge_backup(create_snapshot=False)
-        if not backup_ok:
-            QMessageBox.critical(
-                self, 'GitHub backup check failed',
-                f'The token can read the bridge, but a verified database backup failed.\n\n{backup_detail}',
-            )
-            self.refresh_stats()
-            return
-        self.append_log('Initial memory database bridge backup uploaded and verified.')
+        self.append_log('GitHub access verified. Starting memory monitoring; database backups run independently.')
         self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
         self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.helper_delivery.connect(self.append_helper_delivery); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
         self.worker_thread.start(); self.start_signal.emit();

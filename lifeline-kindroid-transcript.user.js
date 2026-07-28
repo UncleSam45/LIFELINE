@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.1
+// @version      1.2.2
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -33,6 +33,7 @@
   let autoCapture = true;
   let lastUrl = location.href;
   let ui = null;
+  let transcriptPanelAttemptedForCall = '';
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -215,14 +216,19 @@
   async function extractTranscript() {
     const rowSelectors = ['[class*="call-transcript-panel-v2_row__"]', '[class*="call-transcript-panel_row__"]', '[class*="transcript"][class*="row"]'];
     let rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
-    if (!rows.length) {
+    const callId = groupId();
+    if (!rows.length && transcriptPanelAttemptedForCall !== callId) {
+      transcriptPanelAttemptedForCall = callId;
       const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
-      for (const button of menuButtons) {
+      const button = menuButtons[0];
+      if (button) {
         clickElement(button);
         let option = null;
         for (let attempt = 0; attempt < 16 && !option; attempt += 1) { await sleep(attempt ? 150 : 350); option = findTranscriptOption(); }
-        if (option) { clickElement(option); await sleep(900); break; }
+        if (option) { clickElement(option); await sleep(900); }
       }
+    }
+    if (!rows.length) {
       for (let attempt = 0; attempt < 20 && !rows.length; attempt += 1) {
         rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
         if (!rows.length) await sleep(150);
