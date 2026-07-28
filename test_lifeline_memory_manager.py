@@ -3,14 +3,16 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
+import lifeline_memory_manager
 from lifeline_memory_manager import (
     MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS,
     MainWindow,
     MemoryDB,
     ProcessingWorker,
     SituationRecapComposer,
+    _credential_settings,
     _participant_ai_map,
     _decode_bridge_config,
     open_minimized_to_tray,
@@ -171,6 +173,39 @@ class TelemetryOutputTests(unittest.TestCase):
         window.telemetry_tabs.addTab.assert_called_once_with(editor, "Future Output Channel")
         editor.setPlainText.assert_called_once_with("payload")
         self.assertIs(window.tab_edits["Future Output Channel"], editor)
+
+
+class CredentialPersistenceTests(unittest.TestCase):
+    def test_credentials_use_the_explicit_application_data_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            credentials_path = Path(directory) / "lifeline_credentials.ini"
+            with patch.object(lifeline_memory_manager, "CREDENTIALS_PATH", credentials_path):
+                settings = _credential_settings()
+                settings.setValue("github_token", "github-secret")
+                settings.setValue("kindroid_api_key", "kn_secret")
+                settings.sync()
+
+                reloaded = _credential_settings()
+                self.assertEqual(reloaded.value("github_token"), "github-secret")
+                self.assertEqual(reloaded.value("kindroid_api_key"), "kn_secret")
+                self.assertEqual(Path(reloaded.fileName()), credentials_path)
+
+    def test_save_credentials_flushes_both_fields_immediately(self) -> None:
+        window = Mock()
+        window.credential_settings = Mock()
+        window.github_token.text.return_value = " github-secret "
+        window.kindroid_api_key.text.return_value = " kn_secret "
+
+        MainWindow.save_credentials(window)
+
+        self.assertEqual(
+            window.credential_settings.setValue.call_args_list,
+            [
+                call("github_token", "github-secret"),
+                call("kindroid_api_key", "kn_secret"),
+            ],
+        )
+        window.credential_settings.sync.assert_called_once_with()
 
 
 class LaunchBehaviorTests(unittest.TestCase):
