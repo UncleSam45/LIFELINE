@@ -183,19 +183,29 @@ class GitHubBridge:
         content = str(payload.get("content") or "").replace("\n", "")
         return (base64.b64decode(content) if content else b""), str(payload.get("sha") or "")
 
-    def write_bytes(self, path: str, data: bytes, message: str) -> None:
+    def write_bytes(self, path: str, data: bytes, message: str) -> str:
         if not self.enabled:
-            return
+            return ""
         _old, sha = self.read_bytes(path)
         body = {"message": message, "branch": BRIDGE_BRANCH, "content": base64.b64encode(data).decode("ascii")}
         if sha:
             body["sha"] = sha
         response = requests.put(self._url(path, ref=False), headers=self._headers(), json=body, timeout=45)
         response.raise_for_status()
+        payload = response.json()
+        return str(payload.get("content", {}).get("sha") or "")
+
+    @staticmethod
+    def _git_blob_sha(data: bytes) -> str:
+        """Return the object ID GitHub assigns to an uploaded file payload."""
+        header = f"blob {len(data)}\0".encode("ascii")
+        return hashlib.sha1(header + data).hexdigest()
 
     def write_and_verify_bytes(self, path: str, data: bytes, message: str) -> None:
-        """Upload bytes and prove that the bridge now returns the same payload."""
-        self.write_bytes(path, data, message)
+        """Upload bytes and verify the accepted blob without relying on a stale ref read."""
+        uploaded_sha = self.write_bytes(path, data, message)
+        if uploaded_sha and uploaded_sha == self._git_blob_sha(data):
+            return
         remote_data, _sha = self.read_bytes(path)
         if hashlib.sha256(remote_data).digest() != hashlib.sha256(data).digest():
             raise RuntimeError(f"GitHub bridge verification failed for {path}")
@@ -2159,13 +2169,14 @@ class MainWindow(QMainWindow):
         self.db.bridge = GitHubBridge(token)
         backup_ok, backup_detail = self.db.checked_bridge_backup(create_snapshot=False)
         if not backup_ok:
-            QMessageBox.critical(
-                self, 'GitHub backup check failed',
-                f'The token can read the bridge, but a verified database backup failed.\n\n{backup_detail}',
+            QMessageBox.warning(
+                self, 'GitHub backup warning',
+                f'Monitoring will continue, but the initial database backup could not be verified.\n\n{backup_detail}',
             )
             self.refresh_stats()
-            return
-        self.append_log('Initial memory database bridge backup uploaded and verified.')
+            self.append_log(f'Initial memory database bridge backup warning: {backup_detail}')
+        else:
+            self.append_log('Initial memory database bridge backup uploaded and verified.')
         self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
         self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.helper_delivery.connect(self.append_helper_delivery); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
         self.worker_thread.start(); self.start_signal.emit();

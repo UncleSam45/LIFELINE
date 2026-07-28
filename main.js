@@ -1537,7 +1537,16 @@ function bindDirectoryEvents() {
   document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
   document.querySelectorAll('.person').forEach((button) => button.addEventListener('click', () => { state.selectedUid = button.dataset.uid; state.activeView = 'directory'; state.activeEntryTab = 'profile'; render(); }));
-  document.querySelector('#add').addEventListener('click', () => { const entry = ensureEntry({ ...DEFAULT_ENTRY, name: 'New Person' }); entries().push(entry); state.selectedUid = entry.directory_uid; saveBridge('Add directory person'); });
+  document.querySelector('#add').addEventListener('click', () => {
+    const entry = ensureEntry({ ...DEFAULT_ENTRY, name: 'New Person' });
+    entries().push(entry);
+    state.selectedUid = entry.directory_uid;
+    state.activeView = 'directory';
+    state.activeEntryTab = 'profile';
+    state.search = '';
+    state.filter = 'active';
+    saveBridge('Add directory person');
+  });
   document.querySelector('#remove').addEventListener('click', () => { const entry = selectedEntry(); if (entry && confirm(`Remove ${entry.name || 'this person'}?`)) { state.config.directory_entries = entries().filter((item) => item.directory_uid !== entry.directory_uid); state.selectedUid = ''; saveBridge('Remove directory person'); } });
   document.querySelector('#save')?.addEventListener('click', () => saveBridge('Update directory'));
   document.querySelector('#settings-toggle').addEventListener('click', () => { state.settingsOpen = !state.settingsOpen; render(); });
