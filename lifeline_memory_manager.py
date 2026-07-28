@@ -853,6 +853,35 @@ class MemoryDB:
             ).fetchone()
         return row is None
 
+    def claim_situation_recap(self, group_id: str, participants: Iterable[str], source_file: str) -> int:
+        """Atomically reserve the hourly recap slot across workers and app instances."""
+        if not group_id:
+            return 0
+        cutoff = (_dt.datetime.now() - _dt.timedelta(seconds=SITUATION_RECAP_INTERVAL_SECONDS)).replace(microsecond=0).isoformat()
+        with self.lock, self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            recent = conn.execute(
+                "SELECT 1 FROM situation_recaps WHERE group_id=? AND created_at>=? LIMIT 1",
+                (group_id, cutoff),
+            ).fetchone()
+            if recent:
+                return 0
+            cursor = conn.execute(
+                "INSERT INTO situation_recaps(group_id,participants,recap,source_file,created_at,group_sent,direct_sent) "
+                "VALUES(?,?,?,?,?,0,0)",
+                (group_id, json.dumps(list(participants)), "", source_file, now_iso()),
+            )
+            return int(cursor.lastrowid)
+
+    def complete_situation_recap(self, recap_id: int, recap: str, group_sent: bool, direct_sent: int) -> None:
+        """Complete a previously claimed recap slot after generation and delivery."""
+        with self.lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE situation_recaps SET recap=?,group_sent=?,direct_sent=? WHERE id=?",
+                (recap, int(group_sent), direct_sent, recap_id),
+            )
+            self._mark_changed(conn, "complete_situation_recap")
+
     def record_situation_recap(
         self, group_id: str, participants: Iterable[str], recap: str, source_file: str,
         group_sent: bool, direct_sent: int,
@@ -1684,6 +1713,10 @@ class ProcessingWorker(QObject):
         if not memories:
             self.log.emit("Situation recap skipped: no memory keywords were updated in the last 24 hours.")
             return
+        recap_id = self.db.claim_situation_recap(group_id, participants, source)
+        if not recap_id:
+            self.log.emit(f"Situation recap throttled for group {group_id}: one was produced within the last hour.")
+            return
 
         prompt = SituationRecapComposer.prompt(memories, participants)
         self.output.emit("Situation Recap Prompt", prompt)
@@ -1708,7 +1741,7 @@ class ProcessingWorker(QObject):
                 self.log.emit(f"Situation recap delivery failed for {str(name).strip()} ({ai_id}): {status}")
         # A generated recap counts toward the interval even if a downstream API
         # delivery fails, preventing every transcript from causing another LLM call.
-        self.db.record_situation_recap(group_id, participants, recap, source, group_ok, direct_sent)
+        self.db.complete_situation_recap(recap_id, recap, group_ok, direct_sent)
         self.log.emit(
             f"Situation recap produced for group {group_id}: memory_updates={len(memories)}; "
             f"group_sent={int(group_ok)} ({group_status}); personal_sent={direct_sent}; "

@@ -165,6 +165,7 @@ class SituationRecapTests(WorkerTestCase):
     def test_recap_is_separate_llm_call_and_sent_to_group_and_people(self, group_send, direct_send) -> None:
         worker = self.make_worker()
         worker.db.situation_recap_due.return_value = True
+        worker.db.claim_situation_recap.return_value = 42
         worker.db.updated_keyword_memories.return_value = [{
             "person": "KIN", "keyword": "launch", "active_summary": "Kin launched it.",
             "updated_at": "2026-07-28T10:00:00",
@@ -179,10 +180,7 @@ class SituationRecapTests(WorkerTestCase):
         self.assertIn("separate recap task", client.generate.call_args.args[0])
         group_send.assert_called_once_with("group", "SITUATION RECAP", "Kin launched it.")
         self.assertEqual(direct_send.call_count, 2)
-        worker.db.record_situation_recap.assert_called_once_with(
-            "group", ["Kin", "Nova"], "Kin launched it.",
-            "transcripts/group/transcript.json", True, 2,
-        )
+        worker.db.complete_situation_recap.assert_called_once_with(42, "Kin launched it.", True, 2)
 
     def test_prompt_rejects_invention_and_database_language(self) -> None:
         prompt = SituationRecapComposer.prompt([{
@@ -203,6 +201,15 @@ class RecapPersistenceTests(unittest.TestCase):
             db.record_situation_recap("group-a", ["Kin"], "Recap", "source", True, 1)
             self.assertFalse(db.situation_recap_due("group-a"))
             self.assertTrue(db.situation_recap_due("group-b"))
+
+    def test_recap_claim_is_atomic_for_an_hour(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = MemoryDB(root / "memory.db", root / "backups")
+            first = db.claim_situation_recap("group-a", ["Kin"], "source")
+            second = db.claim_situation_recap("group-a", ["Kin"], "source")
+            self.assertGreater(first, 0)
+            self.assertEqual(second, 0)
 
 
 class TelemetryOutputTests(unittest.TestCase):
