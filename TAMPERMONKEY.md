@@ -1,5 +1,13 @@
 # LIFELINE Kindroid transcript userscript
 
+## Call message toolkit
+
+`kindroid-call-toolkit.js` is the shared call-page toolkit used by Electron and Tampermonkey. On Kindroid call pages it mounts a floating panel at the middle-left of the screen. Pressing Enter in its text area sends the text through the visible Kindroid composer, automatically enclosed in asterisks; Shift+Enter creates a new line. It also provides one-click `*CONTINUES CONVERSATION*` and `*SAM PHYSICALLY ENTERS THE ROOM*` presets.
+
+For Tampermonkey, install `lifeline-kindroid-call-toolkit.user.js` in the same way as any userscript. Its `@require` loads the shared toolkit implementation, so Electron and browser installations use identical composer detection and sending behavior. If installing from a different branch or fork, change the `@require` URL to that raw `kindroid-call-toolkit.js` file.
+
+## Transcript bridge
+
 `lifeline-kindroid-transcript.user.js` brings the Electron group-call transcript bridge to normal browsers through Tampermonkey.
 
 GROUPMAKER initializes `transcripts/<group-id>/transcript.json` with its participant names when a group is created or updated. If a transcript already has an empty participant list, the userscript recovers the matching names from `config.json` before saving. It only detects speaker names from the Kindroid DOM when neither source contains GROUPMAKER metadata. Captures append transcript text without replacing authoritative participants.

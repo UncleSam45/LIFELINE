@@ -11,6 +11,7 @@ const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
 const KINDROID_HOME_URL = 'https://kindroid.ai/';
+const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'kindroid-call-toolkit.js'), 'utf8');
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -76,6 +77,11 @@ function createKindroidPanel() {
     if (!isMainFrame || errorCode === -3) return;
     if (validatedURL === KINDROID_HOME_URL || kindroidPanel?.isDestroyed()) return;
     kindroidPanel.loadURL(KINDROID_HOME_URL).catch(() => {});
+  });
+  kindroidPanel.webContents.on('did-finish-load', () => {
+    if (/^https:\/\/(?:www\.)?kindroid\.ai\//.test(kindroidPanel.webContents.getURL())) {
+      kindroidPanel.webContents.executeJavaScript(KINDROID_TOOLKIT_SOURCE).catch(() => {});
+    }
   });
   kindroidPanel.webContents.setWindowOpenHandler(() => ({
     action: 'allow',
