@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from lifeline_memory_manager import (
     MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS,
+    GitHubBridge,
     MainWindow,
     MemoryDB,
     ProcessingWorker,
@@ -15,6 +16,33 @@ from lifeline_memory_manager import (
     _decode_bridge_config,
     open_minimized_to_tray,
 )
+
+
+class BridgeBackupTests(unittest.TestCase):
+    @patch.object(GitHubBridge, "read_bytes", return_value=(b"database", "sha"))
+    @patch.object(GitHubBridge, "write_bytes")
+    def test_bridge_upload_is_read_back_and_verified(self, write_bytes, read_bytes) -> None:
+        bridge = GitHubBridge("token")
+        bridge.write_and_verify_bytes("memory/latest.db", b"database", "backup")
+        write_bytes.assert_called_once_with("memory/latest.db", b"database", "backup")
+        read_bytes.assert_called_once_with("memory/latest.db")
+
+    @patch.object(GitHubBridge, "read_bytes", return_value=(b"corrupt", "sha"))
+    @patch.object(GitHubBridge, "write_bytes")
+    def test_bridge_upload_rejects_mismatched_readback(self, _write_bytes, _read_bytes) -> None:
+        bridge = GitHubBridge("token")
+        with self.assertRaisesRegex(RuntimeError, "verification failed"):
+            bridge.write_and_verify_bytes("memory/latest.db", b"database", "backup")
+
+    def test_checked_backup_records_missing_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
+            root = Path(directory)
+            db = MemoryDB(root / "memory.db", root / "backups")
+            db.bridge = GitHubBridge("")
+            ok, detail = db.checked_bridge_backup()
+            self.assertFalse(ok)
+            self.assertIn("token", detail)
+            self.assertNotEqual(db.last_bridge_check, "never")
 
 
 class WorkerTestCase(unittest.TestCase):

@@ -193,6 +193,13 @@ class GitHubBridge:
         response = requests.put(self._url(path, ref=False), headers=self._headers(), json=body, timeout=45)
         response.raise_for_status()
 
+    def write_and_verify_bytes(self, path: str, data: bytes, message: str) -> None:
+        """Upload bytes and prove that the bridge now returns the same payload."""
+        self.write_bytes(path, data, message)
+        remote_data, _sha = self.read_bytes(path)
+        if hashlib.sha256(remote_data).digest() != hashlib.sha256(data).digest():
+            raise RuntimeError(f"GitHub bridge verification failed for {path}")
+
     def list_tree(self, path: str) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
@@ -260,6 +267,7 @@ MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS = 5 * 60
 SITUATION_RECAP_INTERVAL_SECONDS = 60 * 60
 SITUATION_RECAP_LOOKBACK_HOURS = 24
 KINDROID_API_BASE_URL = "https://api.kindroid.ai/v1"
+BRIDGE_BACKUP_INTERVAL_SECONDS = 3 * 60
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help="--help" in argv or "-h" in argv)
@@ -511,6 +519,9 @@ class MemoryDB:
         self.last_write = "never"
         self.last_external_mirror = "never"
         self.last_snapshot = "never"
+        self.last_bridge_backup = "never"
+        self.last_bridge_check = "never"
+        self.last_bridge_error = "none"
         self.restore_source = RESTORE_SOURCE_USED
         self.lock = threading.RLock()
         self.bridge = GitHubBridge()
@@ -651,11 +662,31 @@ class MemoryDB:
             self._rotate_memory_backups()
         if self.bridge.enabled:
             data = self.latest_mirror_path.read_bytes()
-            self.bridge.write_bytes(BRIDGE_MEMORY_LATEST_PATH, data, "Back up latest LIFELINE memory database")
+            self.bridge.write_and_verify_bytes(BRIDGE_MEMORY_LATEST_PATH, data, "Back up latest LIFELINE memory database")
             if create_snapshot:
                 stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.bridge.write_bytes(f"{BRIDGE_MEMORY_SNAPSHOT_ROOT}/lifeline_memory_{stamp}.db", data, "Snapshot LIFELINE memory database")
+            self.last_bridge_backup = now_human()
+            self.last_bridge_check = now_human()
+            self.last_bridge_error = "none"
         return True, snapshot_msg
+
+    def checked_bridge_backup(self, create_snapshot: bool = False) -> Tuple[bool, str]:
+        """Back up and retain a visible status instead of silently losing failures."""
+        if not self.bridge.enabled:
+            self.last_bridge_check = now_human()
+            self.last_bridge_error = "GitHub bridge token is not configured"
+            return False, self.last_bridge_error
+        try:
+            result = self.mirror_to_external_backup(create_snapshot=create_snapshot)
+            if not result[0]:
+                self.last_bridge_check = now_human()
+                self.last_bridge_error = result[1]
+            return result
+        except Exception as exc:
+            self.last_bridge_check = now_human()
+            self.last_bridge_error = str(exc)
+            return False, self.last_bridge_error
 
     def _rotate_memory_backups(self, keep: int = 288) -> None:
         snapshots = sorted(self.memory_backup_root.glob("lifeline_memory_*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1428,9 +1459,12 @@ class ProcessingWorker(QObject):
                 except Exception as exc: self.error.emit(f"GitHub transcript poll failed: {exc}")
                 self.next_bridge_sync = now_ts + 60
             if now_ts >= self.next_bridge_backup:
-                try: self.db.mirror_to_external_backup(create_snapshot=True)
-                except Exception as exc: self.log.emit(f"Memory database bridge backup skipped: {exc}")
-                self.next_bridge_backup = now_ts + 180
+                ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
+                if ok:
+                    self.log.emit("Memory database bridge backup uploaded and verified")
+                else:
+                    self.error.emit(f"Memory database bridge backup FAILED: {detail}")
+                self.next_bridge_backup = now_ts + BRIDGE_BACKUP_INTERVAL_SECONDS
             self.monitor.emit({"buffered": self.buffer.size, "pending": len(self.buffer.items), "files": len(self.remote_entry_counts)})
         self.stop()
 
@@ -2110,7 +2144,7 @@ class MainWindow(QMainWindow):
                 self.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
                 self.status_label.setText('GitHub token required')
                 return
-            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository.')
+            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read and write access to the bridge repository.')
             self.github_token.setFocus(); return
         self.save_settings();
         if self.worker_thread: return
@@ -2123,6 +2157,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'GitHub access failed', f'The token could not access {BRIDGE_OWNER}/{BRIDGE_REPO}.\n\n{exc}')
             return
         self.db.bridge = GitHubBridge(token)
+        backup_ok, backup_detail = self.db.checked_bridge_backup(create_snapshot=False)
+        if not backup_ok:
+            QMessageBox.critical(
+                self, 'GitHub backup check failed',
+                f'The token can read the bridge, but a verified database backup failed.\n\n{backup_detail}',
+            )
+            self.refresh_stats()
+            return
+        self.append_log('Initial memory database bridge backup uploaded and verified.')
         self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
         self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.helper_delivery.connect(self.append_helper_delivery); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
         self.worker_thread.start(); self.start_signal.emit();
@@ -2178,6 +2221,9 @@ class MainWindow(QMainWindow):
             f"Backup root: {self.db.memory_backup_root}\n"
             f"Last DB write: {self.db.last_write}\n"
             f"Last external mirror: {self.db.last_external_mirror}\n"
+            f"Last verified bridge backup: {self.db.last_bridge_backup}\n"
+            f"Last bridge check: {self.db.last_bridge_check}\n"
+            f"Last bridge error: {self.db.last_bridge_error}\n"
             f"Memory row count: {self.db._database_score(self.db.path)}\n"
             f"Backup row count: {self.db.backup_score()}\n"
             f"Restore source used on launch: {self.db.restore_source}"
