@@ -1456,6 +1456,14 @@ class ProcessingWorker(QObject):
         self.stop_flag.set()
         self.status.emit("Idle")
 
+    def backup_bridge_database(self) -> None:
+        """Attempt the optional remote backup without interrupting memory processing."""
+        ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
+        if ok:
+            self.log.emit("Memory database bridge backup uploaded and verified")
+        else:
+            self.log.emit(f"Memory database bridge backup unavailable; monitoring continues: {detail}")
+
     def loop(self) -> None:
         idle = self.settings.int('idle_timeout')
         while not self.stop_flag.is_set():
@@ -1469,11 +1477,7 @@ class ProcessingWorker(QObject):
                 except Exception as exc: self.error.emit(f"GitHub transcript poll failed: {exc}")
                 self.next_bridge_sync = now_ts + 60
             if now_ts >= self.next_bridge_backup:
-                ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
-                if ok:
-                    self.log.emit("Memory database bridge backup uploaded and verified")
-                else:
-                    self.error.emit(f"Memory database bridge backup FAILED: {detail}")
+                self.backup_bridge_database()
                 self.next_bridge_backup = now_ts + BRIDGE_BACKUP_INTERVAL_SECONDS
             self.monitor.emit({"buffered": self.buffer.size, "pending": len(self.buffer.items), "files": len(self.remote_entry_counts)})
         self.stop()
@@ -2154,7 +2158,7 @@ class MainWindow(QMainWindow):
                 self.append_log('Automatic GitHub monitoring is waiting for a GitHub token.')
                 self.status_label.setText('GitHub token required')
                 return
-            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read and write access to the bridge repository.')
+            QMessageBox.warning(self, 'GitHub token required', 'Enter a GitHub fine-grained personal access token with Contents: Read access to the bridge repository. Write access is optional and only used for database backups.')
             self.github_token.setFocus(); return
         self.save_settings();
         if self.worker_thread: return
@@ -2167,16 +2171,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, 'GitHub access failed', f'The token could not access {BRIDGE_OWNER}/{BRIDGE_REPO}.\n\n{exc}')
             return
         self.db.bridge = GitHubBridge(token)
-        backup_ok, backup_detail = self.db.checked_bridge_backup(create_snapshot=False)
-        if not backup_ok:
-            QMessageBox.warning(
-                self, 'GitHub backup warning',
-                f'Monitoring will continue, but the initial database backup could not be verified.\n\n{backup_detail}',
-            )
-            self.refresh_stats()
-            self.append_log(f'Initial memory database bridge backup warning: {backup_detail}')
-        else:
-            self.append_log('Initial memory database bridge backup uploaded and verified.')
+        self.append_log('GitHub access verified. Starting memory monitoring; database backups run independently.')
         self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
         self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.helper_delivery.connect(self.append_helper_delivery); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
         self.worker_thread.start(); self.start_signal.emit();

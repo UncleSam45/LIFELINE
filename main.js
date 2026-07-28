@@ -741,16 +741,24 @@ async function readGithubContentFile(path) {
 
 function isGithubShaMismatch(error) {
   const message = String(error?.message || '');
-  return Number(error?.status) === 409 || /does not match/i.test(message) || /sha/i.test(message) && /match/i.test(message);
+  return Number(error?.status) === 409
+    || /does not match/i.test(message)
+    || /sha/i.test(message) && /(match|supplied|required|missing)/i.test(message);
 }
 
 async function refreshBridgeSha() {
-  const { sha } = await readGithubContentFile(BRIDGE_PATH);
-  state.bridgeSha = sha;
-  return sha;
+  try {
+    const file = await githubRequest(bridgeUrl(BRIDGE_PATH));
+    state.bridgeSha = String(file.sha || '');
+  } catch (error) {
+    if (Number(error?.status) !== 404) throw error;
+    state.bridgeSha = '';
+  }
+  return state.bridgeSha;
 }
 
 async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
+  if (!state.bridgeSha) await refreshBridgeSha();
   try {
     const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
       method: 'PUT',
@@ -822,7 +830,8 @@ async function loadBridge() {
   }
   const bestCandidate = loadedCandidates.slice().sort((a, b) => b.richness - a.richness)[0];
   if (bestCandidate) {
-    state.bridgeSha = bestCandidate.path === BRIDGE_PATH ? bestCandidate.sha : '';
+    const currentBridgeCandidate = loadedCandidates.find((candidate) => candidate.path === BRIDGE_PATH);
+    state.bridgeSha = currentBridgeCandidate?.sha || '';
     state.config = bestCandidate.config;
     entries().forEach(ensureEntry);
     journalEntries();

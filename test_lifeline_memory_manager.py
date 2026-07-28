@@ -52,6 +52,19 @@ class BridgeBackupTests(unittest.TestCase):
             self.assertIn("token", detail)
             self.assertNotEqual(db.last_bridge_check, "never")
 
+    def test_worker_backup_failure_is_logged_without_worker_error(self) -> None:
+        worker = ProcessingWorker.__new__(ProcessingWorker)
+        worker.db = Mock()
+        worker.db.checked_bridge_backup.return_value = (False, "write access denied")
+        worker.log = Mock()
+        worker.error = Mock()
+
+        worker.backup_bridge_database()
+
+        worker.log.emit.assert_called_once()
+        self.assertIn("monitoring continues", worker.log.emit.call_args.args[0])
+        worker.error.emit.assert_not_called()
+
 
 class WorkerTestCase(unittest.TestCase):
     def make_worker(self) -> ProcessingWorker:
