@@ -85,7 +85,7 @@ RUNTIME_DB_PATH = DB_PATH
 RUNTIME_BACKUP_ROOT = DEFAULT_BACKUP_ROOT
 RESTORE_SOURCE_USED = "none"
 VALID_TYPES = {"fact", "event", "plan", "preference", "relationship", "status", "lore", "project"}
-KINDROID_REQUESTER = "LIFELINE-MEMORY-MANAGER-CONTEXT-REMINDER"
+KINDROID_REQUESTER = "LIFELINE-MEMORY-MANAGER"
 BRIDGE_OWNER = os.environ.get("LIFELINE_BRIDGE_OWNER", "unclesam45")
 BRIDGE_REPO = os.environ.get("LIFELINE_BRIDGE_REPO", "LIFELINE_BRIDGE")
 BRIDGE_BRANCH = os.environ.get("LIFELINE_BRIDGE_BRANCH", "main")
@@ -110,6 +110,23 @@ def _credential_settings() -> QSettings:
     """Return the stable, file-backed credential store used by every launch mode."""
     CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
     return QSettings(str(CREDENTIALS_PATH), QSettings.IniFormat)
+
+
+def _participant_ai_map(config: Dict[str, Any], group_id: str) -> Dict[str, str]:
+    """Resolve participant names to AI IDs from both group and directory data."""
+    directory = {
+        re.sub(r"\s+", " ", str(row.get("name") or "").strip()).casefold(): str(row.get("ai_id") or "").strip()
+        for row in config.get("directory_entries", [])
+        if isinstance(row, dict) and str(row.get("name") or "").strip() and str(row.get("ai_id") or "").strip()
+    }
+    for session in config.get("groupmaker_sessions", []):
+        if not isinstance(session, dict) or str(session.get("group_id") or "").strip() != group_id:
+            continue
+        for name, ai_id in zip(session.get("names", []), session.get("ai_list", [])):
+            normalized_name = re.sub(r"\s+", " ", str(name).strip()).casefold()
+            if normalized_name and str(ai_id).strip():
+                directory[normalized_name] = str(ai_id).strip()
+    return directory
 
 
 class GitHubBridge:
@@ -172,23 +189,11 @@ class GitHubBridge:
     def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str, List[str]]]:
         """Return transcript content plus optional AI IDs mapped from bridge configuration."""
         documents: List[Tuple[str, List[str], List[str], str, List[str]]] = []
-        ai_ids_by_group: Dict[str, Dict[str, str]] = {}
         config_data, _config_sha = self.read_bytes("config.json")
         try:
             config = json.loads(config_data.decode("utf-8")) if config_data else {}
         except (UnicodeDecodeError, json.JSONDecodeError):
             config = {}
-        for session in config.get("groupmaker_sessions", []) if isinstance(config, dict) else []:
-            if not isinstance(session, dict):
-                continue
-            group_id = str(session.get("group_id") or "").strip()
-            mapping = {
-                str(name).strip().casefold(): str(ai_id).strip()
-                for name, ai_id in zip(session.get("names", []), session.get("ai_list", []))
-                if str(name).strip() and str(ai_id).strip()
-            }
-            if group_id and mapping:
-                ai_ids_by_group[group_id] = mapping
         for group in self.list_tree(BRIDGE_TRANSCRIPT_ROOT):
             if group.get("type") != "dir":
                 continue
@@ -205,8 +210,8 @@ class GitHubBridge:
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
                 group_id = str(payload.get("group_id") or "").strip() if isinstance(payload, dict) else ""
-                mapping = ai_ids_by_group.get(group_id, {})
-                ai_ids = [mapping.get(name.casefold(), "") for name in participants]
+                mapping = _participant_ai_map(config if isinstance(config, dict) else {}, group_id)
+                ai_ids = [mapping.get(re.sub(r"\s+", " ", name).casefold(), "") for name in participants]
                 documents.append((str(item.get("path")), entries, participants, group_id, ai_ids))
         return documents
 
@@ -216,10 +221,12 @@ NON_PERSON_SUBJECTS = {
     "wall", "walls", "floor", "ceiling", "room", "rooms", "door", "doors", "window", "windows",
 }
 
-MAX_CONTEXT_REMINDERS_PER_CHUNK = 1
+MAX_MEMORY_HELPERS_PER_CHUNK = 1
 MAX_MEMORIES_PER_CHUNK = 5
-CONTEXT_REMINDER_COOLDOWN_SECONDS = 3600
-CONTEXT_REMINDER_ACTIVITY_WINDOW_SECONDS = 5 * 60
+MEMORY_HELPER_COOLDOWN_SECONDS = 3600
+MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS = 5 * 60
+SITUATION_RECAP_INTERVAL_SECONDS = 60 * 60
+SITUATION_RECAP_LOOKBACK_HOURS = 24
 KINDROID_API_BASE_URL = "https://api.kindroid.ai/v1"
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -346,7 +353,7 @@ def _load_groupmaker_session_for_sources(source_file: str) -> Dict[str, Any]:
     return open_sessions[0] if open_sessions else {}
 
 
-def _send_group_context_reminder(group_id: str, description: str) -> Tuple[bool, str]:
+def _send_group_message(group_id: str, label: str, description: str) -> Tuple[bool, str]:
     api_key = _load_feeder_api_key()
     if not group_id:
         return False, "missing group_id"
@@ -361,7 +368,7 @@ def _send_group_context_reminder(group_id: str, description: str) -> Tuple[bool,
                 "Content-Type": "application/json",
                 "X-Kindroid-Requester": KINDROID_REQUESTER,
             },
-            json={"group_id": group_id, "message": f"*CONTEXT REMINDER: {description}*"},
+            json={"group_id": group_id, "message": f"*{label}: {description}*"},
             timeout=45,
         )
         if response.ok:
@@ -372,7 +379,7 @@ def _send_group_context_reminder(group_id: str, description: str) -> Tuple[bool,
         return False, str(exc)
 
 
-def _send_direct_context_reminder(ai_id: str, description: str) -> Tuple[bool, str]:
+def _send_direct_message(ai_id: str, label: str, description: str) -> Tuple[bool, str]:
     api_key = _load_feeder_api_key()
     if not ai_id:
         return False, "missing ai_id"
@@ -387,7 +394,7 @@ def _send_direct_context_reminder(ai_id: str, description: str) -> Tuple[bool, s
                 "Content-Type": "application/json",
                 "X-Kindroid-Requester": KINDROID_REQUESTER,
             },
-            json={"ai_id": ai_id, "message": f"*CONTEXT REMINDER: {description}*", "stream": False},
+            json={"ai_id": ai_id, "message": f"*{label}: {description}*", "stream": False},
             timeout=45,
         )
         if response.ok:
@@ -398,9 +405,9 @@ def _send_direct_context_reminder(ai_id: str, description: str) -> Tuple[bool, s
         return False, str(exc)
 
 
-def _record_latest_group_context_reminders(session: Dict[str, Any], reminders: List[Dict[str, str]]) -> None:
+def _record_latest_group_memory_helpers(session: Dict[str, Any], helpers: List[Dict[str, str]]) -> None:
     group_id = str(session.get("group_id", "")).strip()
-    if not group_id or not reminders:
+    if not group_id or not helpers:
         return
     try:
         import modules.groupmaker as groupmaker  # pylint: disable=import-outside-toplevel
@@ -409,7 +416,7 @@ def _record_latest_group_context_reminders(session: Dict[str, Any], reminders: L
         state = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         if not isinstance(state, dict):
             state = {}
-        latest = state.get("latest_context_reminders", {})
+        latest = state.get("latest_memory_helpers", {})
         if not isinstance(latest, dict):
             latest = {}
         latest[group_id] = {
@@ -417,17 +424,17 @@ def _record_latest_group_context_reminders(session: Dict[str, Any], reminders: L
             "session_key": str(session.get("session_key", "")).strip(),
             "sent_at": now_iso(),
             "names": [str(name).strip() for name in session.get("names", []) if str(name).strip()],
-            "reminders": [
+            "helpers": [
                 {
                     "person": str(reminder.get("person", "")).strip(),
                     "keyword": str(reminder.get("keyword", "")).strip(),
                     "description": str(reminder.get("description", "")).strip(),
                 }
-                for reminder in reminders
+                for reminder in helpers
                 if str(reminder.get("description", "")).strip()
             ],
         }
-        state["latest_context_reminders"] = latest
+        state["latest_memory_helpers"] = latest
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -437,7 +444,8 @@ class AppSettings:
     DEFAULTS = {
         "ollama_url": "http://localhost:11434", "ollama_model": "qwen3.5:9b",
         "chunk_size": "4000", "minimum_idle_chunk_size": "1500", "maximum_chunk_size": "8000",
-        "idle_timeout": "90", "confidence_threshold": "0.75", "context_reminders_enabled": "1", "window_geometry": "",
+        "idle_timeout": "90", "confidence_threshold": "0.75", "memory_helpers_enabled": "1",
+        "situation_recaps_enabled": "1", "window_geometry": "",
     }
 
     def __init__(self, db: "MemoryDB") -> None:
@@ -643,6 +651,7 @@ class MemoryDB:
         CREATE TABLE IF NOT EXISTS memory_events (id INTEGER PRIMARY KEY AUTOINCREMENT, person_id INTEGER NOT NULL, description TEXT NOT NULL, memory_type TEXT NOT NULL, event_time TEXT NOT NULL, confidence REAL DEFAULT 0.0, source_chunk_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(person_id) REFERENCES people(id), FOREIGN KEY(source_chunk_id) REFERENCES transcript_chunks(id));
         CREATE TABLE IF NOT EXISTS keyword_nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, person_id INTEGER NOT NULL, keyword TEXT NOT NULL, active_summary TEXT NOT NULL, raw_compilation TEXT DEFAULT '', revision_count INTEGER DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_cleaned_at TEXT, UNIQUE(person_id, keyword), FOREIGN KEY(person_id) REFERENCES people(id));
         CREATE TABLE IF NOT EXISTS memory_event_keywords (event_id INTEGER NOT NULL, keyword_node_id INTEGER NOT NULL, PRIMARY KEY(event_id, keyword_node_id), FOREIGN KEY(event_id) REFERENCES memory_events(id), FOREIGN KEY(keyword_node_id) REFERENCES keyword_nodes(id));
+        CREATE TABLE IF NOT EXISTS situation_recaps (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, participants TEXT NOT NULL, recap TEXT NOT NULL, source_file TEXT NOT NULL, created_at TEXT NOT NULL, group_sent INTEGER DEFAULT 0, direct_sent INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """
         with self.lock, self.connect() as conn:
@@ -706,7 +715,7 @@ class MemoryDB:
         recent_text = _normalized_transcript_text("\n".join(str(row["content"] or "") for row in rows))
         return bool(recent_text and normalized in recent_text)
 
-    def context_reminders_for_transcript(self, transcript_text: str, group_people: Iterable[str]) -> List[Dict[str, str]]:
+    def memory_helpers_for_transcript(self, transcript_text: str, group_people: Iterable[str]) -> List[Dict[str, str]]:
         """Return matching memory summaries for people currently present in a GROUPMAKER group."""
         present = {str(name).strip().upper() for name in group_people if str(name).strip()}
         if not transcript_text.strip() or not present:
@@ -737,11 +746,51 @@ class MemoryDB:
                 continue
             seen.add(key)
             matches.append({"person": person, "keyword": keyword, "description": summary})
-            # One transcript chunk produces at most one reminder. A single
-            # group message is enough context and avoids flooding the chat
+            # One transcript chunk produces at most one helper. A single
+            # group message provides enough context and avoids flooding the chat
             # when the same chunk matches many memory nodes.
             break
         return matches
+
+    def updated_keyword_memories(self, hours: int = SITUATION_RECAP_LOOKBACK_HOURS) -> List[Dict[str, str]]:
+        """Return keyword summaries changed during the recap window, oldest first."""
+        cutoff = (_dt.datetime.now() - _dt.timedelta(hours=hours)).replace(microsecond=0).isoformat()
+        with self.lock, self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.name AS person, kn.keyword, kn.active_summary, kn.updated_at
+                FROM keyword_nodes kn
+                JOIN people p ON p.id = kn.person_id
+                WHERE kn.updated_at >= ?
+                ORDER BY kn.updated_at, p.name, kn.keyword
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def situation_recap_due(self, group_id: str, interval_seconds: int = SITUATION_RECAP_INTERVAL_SECONDS) -> bool:
+        """Use persisted recap history so restarts cannot bypass the hourly throttle."""
+        if not group_id:
+            return False
+        cutoff = (_dt.datetime.now() - _dt.timedelta(seconds=interval_seconds)).replace(microsecond=0).isoformat()
+        with self.lock, self.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM situation_recaps WHERE group_id=? AND created_at>=? LIMIT 1",
+                (group_id, cutoff),
+            ).fetchone()
+        return row is None
+
+    def record_situation_recap(
+        self, group_id: str, participants: Iterable[str], recap: str, source_file: str,
+        group_sent: bool, direct_sent: int,
+    ) -> None:
+        with self.lock, self.connect() as conn:
+            conn.execute(
+                "INSERT INTO situation_recaps(group_id,participants,recap,source_file,created_at,group_sent,direct_sent) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (group_id, json.dumps(list(participants)), recap, source_file, now_iso(), int(group_sent), direct_sent),
+            )
+            self._mark_changed(conn, "record_situation_recap")
 
 
     def clear_all_memory(self) -> Tuple[int, str]:
@@ -757,13 +806,14 @@ class MemoryDB:
                     "memory_events": conn.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0],
                     "keyword_nodes": conn.execute("SELECT COUNT(*) FROM keyword_nodes").fetchone()[0],
                     "transcript_chunks": conn.execute("SELECT COUNT(*) FROM transcript_chunks").fetchone()[0],
+                    "situation_recaps": conn.execute("SELECT COUNT(*) FROM situation_recaps").fetchone()[0],
                     "people": conn.execute("SELECT COUNT(*) FROM people").fetchone()[0],
                 }
-                for table in ("memory_event_keywords", "memory_events", "keyword_nodes", "transcript_chunks", "people"):
+                for table in ("memory_event_keywords", "memory_events", "keyword_nodes", "transcript_chunks", "situation_recaps", "people"):
                     conn.execute(f"DELETE FROM {table}")
                 conn.execute(
                     "DELETE FROM sqlite_sequence WHERE name IN "
-                    "('memory_events','keyword_nodes','transcript_chunks','people')"
+                    "('memory_events','keyword_nodes','transcript_chunks','situation_recaps','people')"
                 )
                 cleared_at = self._mark_changed(conn, "clear_all_memory")
                 conn.execute(
@@ -1231,6 +1281,49 @@ Return:
 {{"active_summary":"..."}}'''
 
 
+class SituationRecapComposer:
+    @staticmethod
+    def prompt(memories: Iterable[Dict[str, str]], participants: Iterable[str]) -> str:
+        audience = ", ".join(str(name).strip() for name in participants if str(name).strip())
+        memory_lines = "\n".join(
+            f"- Updated {item['updated_at']} | Person: {item['person']} | "
+            f"Keyword: {item['keyword']} | Current memory: {item['active_summary']}"
+            for item in memories
+        )
+        return f'''You are the situation recap engine for an AI companion system.
+
+This is a separate recap task, not memory extraction and not a memory helper. Using only the memory updates below, explain what happened or changed during the last {SITUATION_RECAP_LOOKBACK_HOURS} hours.
+
+Audience currently active in the conversation:
+{audience}
+
+Memory updates, ordered from oldest to newest:
+{memory_lines}
+
+Rules:
+- Return only valid JSON with exactly one string field named "recap".
+- Do not use markdown and do not add a title or label.
+- Do not invent facts, causes, relationships, quotes, or chronology.
+- Synthesize related updates into a coherent, natural account rather than listing database records.
+- Preserve names, meaningful dates, decisions, plans, status changes, and unresolved matters.
+- Distinguish completed events from current states and future plans.
+- Resolve repeated updates by describing the latest state and the evolution only when useful.
+- Be concise but sufficiently complete. Omit database terms such as keyword, node, memory, transcript, and update.
+- Address the audience neutrally; do not claim every audience member witnessed every event.
+
+Return exactly:
+{{"recap":"A clear, logically ordered recap of the last 24 hours."}}'''
+
+    @staticmethod
+    def validate(parsed: Dict[str, Any]) -> str:
+        recap = re.sub(r"\s+", " ", str(parsed.get("recap") or "")).strip()
+        if not recap:
+            raise ValueError("Situation recap response did not contain a non-empty recap")
+        if len(recap) > 6000:
+            raise ValueError("Situation recap exceeded the 6000-character delivery limit")
+        return recap
+
+
 @dataclass
 class FileChunk:
     source: str
@@ -1263,17 +1356,17 @@ class TranscriptBuffer:
 
 
 class ProcessingWorker(QObject):
-    log = Signal(str); status = Signal(str); monitor = Signal(dict); output = Signal(str, str); refreshed = Signal(); error = Signal(str)
+    log = Signal(str); helper_delivery = Signal(str); status = Signal(str); monitor = Signal(dict); output = Signal(str, str); refreshed = Signal(); error = Signal(str)
 
     def __init__(self, db: MemoryDB, settings: AppSettings, github_token: str) -> None:
         super().__init__(); self.db = db; self.settings = settings; self.stop_flag = threading.Event()
-        self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.context_reminder_sent_at: Dict[Tuple[str, str], float] = {}
+        self.cleanup_queue: "queue.Queue[Tuple[int,int,str,str,str]]" = queue.Queue(); self.remote_entry_counts: Dict[str, int] = {}; self.memory_helper_sent_at: Dict[Tuple[str, str], float] = {}
         self.remote_participants: Dict[str, List[str]] = {}
         self.remote_group_ids: Dict[str, str] = {}
         self.remote_ai_ids: Dict[str, List[str]] = {}
         # Memory extraction may legitimately lag behind transcript intake. Keep
         # the intake time separate so delayed chunks still become memories but
-        # cannot produce realtime context reminders after activity has stopped.
+        # cannot produce real-time memory helpers after activity has stopped.
         self.last_incoming_transcript_at: Dict[str, float] = {}
         self.next_ollama_retry = 0.0
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
@@ -1326,7 +1419,7 @@ class ProcessingWorker(QObject):
                 participant_text = ", ".join(participants) or "none listed"
                 self.log.emit(
                     f"Fetched {len(new_entries)} new transcript entries ({len(text)} chars) from {source}; "
-                    f"current participants: {participant_text}; reminder target group: {group_id or 'none'}"
+                    f"current participants: {participant_text}; message target group: {group_id or 'none'}"
                 )
 
     def process_one(self) -> None:
@@ -1379,27 +1472,33 @@ class ProcessingWorker(QObject):
             for job in jobs:
                 self.clean_job(job)
             self.log.emit(f"Stored and cleaned chunk from {source}; memories={len(memories)}; cleanup_jobs={len(jobs)}")
-            self.send_context_reminders(source, chunk, session, last_incoming_at=last_incoming_at)
+            self.send_memory_helpers(source, chunk, session, last_incoming_at=last_incoming_at)
+            try:
+                self.send_situation_recap(source, session, client)
+            except Exception as recap_error:
+                # Recapping is an independent best-effort LLM workflow. A recap
+                # outage must not re-buffer a chunk whose memories were committed.
+                self.error.emit(f"Situation recap failed; stored memories were preserved: {recap_error}")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
         except Exception as e:
             self.buffer.add(source, chunk)
             self.error.emit(f"Processing failed; GitHub transcript retained in memory for retry: {e}"); self.status.emit('Error')
 
-    def send_context_reminders(
+    def send_memory_helpers(
         self,
         source: str,
         chunk: str,
         session: Dict[str, Any] | None = None,
         last_incoming_at: float = 0.0,
     ) -> None:
-        if self.settings.get('context_reminders_enabled').strip().lower() in {"0", "false", "no", "off"}:
-            self.log.emit("Context reminder skipped: disabled by settings.")
+        if self.settings.get('memory_helpers_enabled').strip().lower() in {"0", "false", "no", "off"}:
+            self.log.emit("Memory helper skipped: disabled by settings.")
             return
         activity_age = time.time() - last_incoming_at
-        if last_incoming_at <= 0 or activity_age > CONTEXT_REMINDER_ACTIVITY_WINDOW_SECONDS:
+        if last_incoming_at <= 0 or activity_age > MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS:
             age_detail = f"{activity_age:.0f} seconds ago" if last_incoming_at > 0 else "unknown"
             self.log.emit(
-                "Context reminder skipped: no incoming transcript activity within the last "
+                "Memory helper skipped: no incoming transcript activity within the last "
                 f"5 minutes (last intake: {age_detail}). Memory extraction and storage were still completed."
             )
             return
@@ -1407,15 +1506,15 @@ class ProcessingWorker(QObject):
         group_id = str(session.get("group_id", "")).strip()
         group_people = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
         if not group_people:
-            self.log.emit("Context reminder skipped: transcript.json contains no current participants.")
+            self.log.emit("Memory helper skipped: transcript.json contains no current participants.")
             return
         if not group_id:
-            self.log.emit("Context reminder skipped: transcript.json has no target group_id; memory extraction continues normally.")
+            self.log.emit("Memory helper skipped: transcript.json has no target group_id; memory extraction continues normally.")
             return
 
-        reminders = self.db.context_reminders_for_transcript(chunk, group_people)
+        reminders = self.db.memory_helpers_for_transcript(chunk, group_people)
         if not reminders:
-            self.log.emit(f"Context reminder check for GROUPMAKER group {group_id}: no matching in-group memories.")
+            self.log.emit(f"Memory helper check for GROUPMAKER group {group_id}: no matching in-group memories.")
             return
 
         sent = 0
@@ -1423,42 +1522,117 @@ class ProcessingWorker(QObject):
         direct_sent = 0
         direct_failed = 0
         now = time.time()
-        participant_targets = [
-            (str(name).strip(), str(ai_id).strip())
+        participant_targets = {
+            re.sub(r"\s+", " ", str(name).strip()).casefold(): (str(name).strip(), str(ai_id).strip())
             for name, ai_id in zip(session.get("names", []), session.get("ai_list", []))
-            if str(ai_id).strip()
-        ]
+            if str(name).strip() and str(ai_id).strip()
+        }
         reminders_sent_to_group: List[Dict[str, str]] = []
-        for reminder in reminders[:MAX_CONTEXT_REMINDERS_PER_CHUNK]:
+        for reminder in reminders[:MAX_MEMORY_HELPERS_PER_CHUNK]:
             cooldown_key = (group_id, str(reminder["description"]))
-            if now - self.context_reminder_sent_at.get(cooldown_key, 0) < CONTEXT_REMINDER_COOLDOWN_SECONDS:
-                self.log.emit(f"Context reminder throttled for GROUPMAKER group {group_id}: recently sent same reminder.")
+            audit_label = (
+                f"TRIGGER={reminder['keyword']!r} | TARGET={reminder['person']} | "
+                f"GROUP={group_id} | HELPER={reminder['description']}"
+            )
+            if now - self.memory_helper_sent_at.get(cooldown_key, 0) < MEMORY_HELPER_COOLDOWN_SECONDS:
+                self.log.emit(f"Memory helper throttled for GROUPMAKER group {group_id}: recently sent same reminder.")
+                self.helper_delivery.emit(f"THROTTLED | {audit_label}")
                 continue
-            ok, status = _send_group_context_reminder(group_id, reminder["description"])
+            ok, status = _send_group_message(group_id, "MEMORY HELPER", reminder["description"])
             label = f"{reminder['person']} / {reminder['keyword']}"
             if ok:
                 sent += 1
                 reminders_sent_to_group.append(reminder)
-                self.log.emit(f"Sent context reminder to GROUPMAKER group {group_id}: {label} ({status})")
+                self.log.emit(f"Sent memory helper to GROUPMAKER group {group_id}: {label} ({status})")
+                self.helper_delivery.emit(f"GROUP SENT | {audit_label} | STATUS={status}")
             else:
                 failed += 1
-                self.log.emit(f"Context reminder failed for GROUPMAKER group {group_id}: {label} ({status})")
-            for participant_name, ai_id in participant_targets:
-                direct_ok, direct_status = _send_direct_context_reminder(ai_id, reminder["description"])
+                self.log.emit(f"Memory helper failed for GROUPMAKER group {group_id}: {label} ({status})")
+                self.helper_delivery.emit(f"GROUP FAILED | {audit_label} | STATUS={status}")
+            target_key = re.sub(r"\s+", " ", str(reminder["person"]).strip()).casefold()
+            target = participant_targets.get(target_key)
+            helper_direct_sent = False
+            if target is None:
+                direct_failed += 1
+                self.log.emit(
+                    f"Personal memory helper not sent for {reminder['person']}: "
+                    "no AI ID mapping was found in GROUPMAKER or the Kindroid directory."
+                )
+                self.helper_delivery.emit(f"DIRECT NOT SENT | {audit_label} | STATUS=missing AI ID mapping")
+            else:
+                participant_name, ai_id = target
+                direct_ok, direct_status = _send_direct_message(ai_id, "MEMORY HELPER", reminder["description"])
                 if direct_ok:
                     direct_sent += 1
-                    self.log.emit(f"Sent personal context reminder to {participant_name} ({ai_id}): {direct_status}")
+                    helper_direct_sent = True
+                    self.log.emit(f"Sent personal memory helper to {participant_name} ({ai_id}): {direct_status}")
+                    self.helper_delivery.emit(
+                        f"DIRECT SENT | {audit_label} | AI_ID={ai_id} | STATUS={direct_status}"
+                    )
                 else:
                     direct_failed += 1
-                    self.log.emit(f"Personal context reminder failed for {participant_name} ({ai_id}): {direct_status}")
-            if ok or direct_sent:
-                self.context_reminder_sent_at[cooldown_key] = now
+                    self.log.emit(f"Personal memory helper failed for {participant_name} ({ai_id}): {direct_status}")
+                    self.helper_delivery.emit(
+                        f"DIRECT FAILED | {audit_label} | AI_ID={ai_id} | STATUS={direct_status}"
+                    )
+            if ok or helper_direct_sent:
+                self.memory_helper_sent_at[cooldown_key] = now
         if reminders_sent_to_group:
-            _record_latest_group_context_reminders(session, reminders_sent_to_group)
+            _record_latest_group_memory_helpers(session, reminders_sent_to_group)
         self.log.emit(
-            f"Context reminder pass complete for GROUPMAKER group {group_id}: "
+            f"Memory helper pass complete for GROUPMAKER group {group_id}: "
             f"group_sent={sent}; group_failed={failed}; personal_sent={direct_sent}; "
-            f"personal_failed={direct_failed}; maximum_memory_matches_per_chunk={MAX_CONTEXT_REMINDERS_PER_CHUNK}."
+            f"personal_failed={direct_failed}; maximum_memory_matches_per_chunk={MAX_MEMORY_HELPERS_PER_CHUNK}."
+        )
+
+    def send_situation_recap(
+        self, source: str, session: Dict[str, Any], client: OllamaClient | None = None,
+    ) -> None:
+        """Generate and deliver at most one recap per active group per hour."""
+        if self.settings.get('situation_recaps_enabled').strip().lower() in {"0", "false", "no", "off"}:
+            self.log.emit("Situation recap skipped: disabled by settings.")
+            return
+        group_id = str(session.get("group_id", "")).strip()
+        participants = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
+        if not group_id or not participants:
+            self.log.emit("Situation recap skipped: transcript metadata needs a group_id and participants.")
+            return
+        if not self.db.situation_recap_due(group_id):
+            self.log.emit(f"Situation recap throttled for group {group_id}: one was produced within the last hour.")
+            return
+        memories = self.db.updated_keyword_memories()
+        if not memories:
+            self.log.emit("Situation recap skipped: no memory keywords were updated in the last 24 hours.")
+            return
+
+        prompt = SituationRecapComposer.prompt(memories, participants)
+        self.output.emit("Situation Recap Prompt", prompt)
+        recap_client = client or OllamaClient(self.settings.get('ollama_url'), self.settings.get('ollama_model'))
+        raw, parsed = recap_client.generate(prompt)
+        self.output.emit("Situation Recap Response", raw)
+        recap = SituationRecapComposer.validate(parsed)
+
+        group_ok, group_status = _send_group_message(group_id, "SITUATION RECAP", recap)
+        direct_sent = 0
+        direct_failed = 0
+        for name, ai_id in zip(session.get("names", []), session.get("ai_list", [])):
+            ai_id = str(ai_id).strip()
+            if not ai_id:
+                continue
+            ok, status = _send_direct_message(ai_id, "SITUATION RECAP", recap)
+            if ok:
+                direct_sent += 1
+                self.log.emit(f"Sent situation recap to {str(name).strip()} ({ai_id}): {status}")
+            else:
+                direct_failed += 1
+                self.log.emit(f"Situation recap delivery failed for {str(name).strip()} ({ai_id}): {status}")
+        # A generated recap counts toward the interval even if a downstream API
+        # delivery fails, preventing every transcript from causing another LLM call.
+        self.db.record_situation_recap(group_id, participants, recap, source, group_ok, direct_sent)
+        self.log.emit(
+            f"Situation recap produced for group {group_id}: memory_updates={len(memories)}; "
+            f"group_sent={int(group_ok)} ({group_status}); personal_sent={direct_sent}; "
+            f"personal_failed={direct_failed}."
         )
 
     def clean_one(self) -> None:
@@ -1691,7 +1865,7 @@ class MainWindow(QMainWindow):
         self.github_token = QLineEdit(); self.github_token.setEchoMode(QLineEdit.Password)
         self.github_token.setPlaceholderText('Fine-grained token with Contents: Read access')
         self.kindroid_api_key = QLineEdit(); self.kindroid_api_key.setEchoMode(QLineEdit.Password)
-        self.kindroid_api_key.setPlaceholderText('kn_ API key for context reminders')
+        self.kindroid_api_key.setPlaceholderText('kn_ API key for memory helpers')
         self.url = QLineEdit(); self.model = QLineEdit(); check = QPushButton('Ping Ollama Core'); check.clicked.connect(self.check_ollama); selftest = QPushButton('Verify Memory Mirror'); selftest.clicked.connect(self.test_memory_backup_restore)
         start = QPushButton('Monitor GitHub'); start.setObjectName('PrimaryButton'); start.clicked.connect(self.start_watch); stop = QPushButton('Suspend'); stop.clicked.connect(self.stop_watch); clear_finder = QPushButton('Clear Finder Memory'); clear_finder.clicked.connect(self.clear_finder_memory)
         widgets = [('GitHub Fine-grained Token', self.github_token), ('Kindroid API Key', self.kindroid_api_key), ('Ollama Endpoint', self.url), ('Inference Model', self.model)]
@@ -1706,11 +1880,20 @@ class MainWindow(QMainWindow):
         left = self.core_panel('CORE STATUS', 'Realtime scan state, ingestion pulse, and memory-processing activity.')
         ll = left.layout(); self.monitor = QLabel('GitHub transcript source:\nRemote documents: 0\nBuffered characters: 0\nPending chunks: 0\nLast poll: not started'); self.monitor.setObjectName('TelemetryBlock')
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setObjectName('ActivityFeed')
-        ll.addWidget(self.monitor); ll.addWidget(QLabel('MEMORY CORE ACTIVITY')); ll.addWidget(self.log, 1); split.addWidget(left)
+        self.helper_log = QPlainTextEdit(); self.helper_log.setReadOnly(True); self.helper_log.setObjectName('ActivityFeed'); self.helper_log.setPlaceholderText('Memory-helper trigger and delivery events will appear here.')
+        clear_helper_log = QPushButton('Clear Memory Helper Log'); clear_helper_log.clicked.connect(self.helper_log.clear)
+        ll.addWidget(self.monitor); ll.addWidget(QLabel('MEMORY CORE ACTIVITY')); ll.addWidget(self.log, 1)
+        ll.addWidget(QLabel('MEMORY HELPER DELIVERY LOG'))
+        ll.addWidget(QLabel('Shows trigger word, helper target, destination, AI ID, message, and delivery result.'))
+        ll.addWidget(self.helper_log, 1); ll.addWidget(clear_helper_log); split.addWidget(left)
 
         center = self.core_panel('OLLAMA / PROCESSING TELEMETRY', 'Prompt streams, model responses, parsed signals, and cleanup traces.')
         cl = center.layout(); self.telemetry_tabs = QTabWidget(); self.tab_edits = {}
-        for name in ['Prompt Sent','Raw Ollama Response','Parsed JSON','Cleanup Prompt','Cleanup Response']:
+        for name in [
+            'Prompt Sent', 'Raw Ollama Response', 'Parsed JSON',
+            'Cleanup Prompt', 'Cleanup Response',
+            'Situation Recap Prompt', 'Situation Recap Response',
+        ]:
             e=QPlainTextEdit(); e.setReadOnly(True); e.setObjectName('TelemetryConsole'); self.telemetry_tabs.addTab(e,name); self.tab_edits[name]=e
         cl.addWidget(self.telemetry_tabs); split.addWidget(center)
 
@@ -1909,7 +2092,7 @@ class MainWindow(QMainWindow):
             return
         self.db.bridge = GitHubBridge(token)
         self.worker_thread = QThread(); self.worker = ProcessingWorker(self.db, self.settings, token); self.worker.moveToThread(self.worker_thread)
-        self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
+        self.start_signal.connect(self.worker.start); self.stop_signal.connect(self.worker.stop); self.worker.log.connect(self.append_log); self.worker.helper_delivery.connect(self.append_helper_delivery); self.worker.status.connect(self.status_label.setText); self.worker.monitor.connect(self.update_monitor); self.worker.output.connect(self.set_output); self.worker.refreshed.connect(self.refresh_all); self.worker.error.connect(self.show_error)
         self.worker_thread.start(); self.start_signal.emit();
 
     def stop_watch(self) -> None:
@@ -1919,11 +2102,23 @@ class MainWindow(QMainWindow):
     def append_log(self, msg: str) -> None:
         self.log.appendPlainText(f"[{_dt.datetime.now().strftime('%H:%M:%S')}] CORE EVENT :: {msg}")
 
+    def append_helper_delivery(self, msg: str) -> None:
+        self.helper_log.appendPlainText(f"[{_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
     def update_monitor(self, d: dict) -> None:
         self.monitor.setText(f"Intake vector: GitHub REST / {BRIDGE_OWNER}/{BRIDGE_REPO}/{BRIDGE_TRANSCRIPT_ROOT}\nDetected source files: {d.get('files',0)}\nBuffered signal characters: {d.get('buffered',0)}\nPending memory chunks: {d.get('pending',0)}\nLatest action: see intelligence feed\nTelemetry refresh: {_dt.datetime.now().strftime('%H:%M:%S')}")
 
     def set_output(self, tab: str, text: str) -> None:
-        self.tab_edits[tab].setPlainText(text)
+        editor = self.tab_edits.get(tab)
+        if editor is None:
+            # Worker telemetry should never terminate the application merely
+            # because a new output channel was added without a matching UI tab.
+            editor = QPlainTextEdit()
+            editor.setReadOnly(True)
+            editor.setObjectName('TelemetryConsole')
+            self.telemetry_tabs.addTab(editor, tab)
+            self.tab_edits[tab] = editor
+        editor.setPlainText(text)
 
     def open_memory_explorer(self) -> None:
         dialog = MemoryExplorerDialog(self)
@@ -2060,6 +2255,14 @@ class MainWindow(QMainWindow):
         self.stop_watch(); super().closeEvent(event)
 
 
+def open_minimized_to_tray(window: MainWindow) -> None:
+    """Start unobtrusively, falling back to a minimized window without a tray."""
+    if window.tray_icon:
+        window.hide()
+    else:
+        window.showMinimized()
+
+
 def main() -> int:
     args = parse_args(sys.argv[1:])
     global RUNTIME_DB_PATH, RUNTIME_BACKUP_ROOT
@@ -2094,13 +2297,7 @@ def main() -> int:
     _INSTANCE_SERVER = instance_server
 
     w = MainWindow()
-    if args.auto_start:
-        if w.tray_icon:
-            QTimer.singleShot(800, w.hide_to_tray)
-        else:
-            w.showMinimized()
-    else:
-        w.show()
+    open_minimized_to_tray(w)
     return app.exec()
 
 
