@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } = require('electron');
 const path = require('path');
 
 const APP_ROOT = __dirname;
@@ -6,6 +6,8 @@ const transcriptWindows = new Map();
 const transcriptCaptureTimers = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
+let tray = null;
+let allowQuit = false;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -38,6 +40,7 @@ function createMainWindow() {
     width: 1500,
     height: 940,
     title: 'LIFELINE',
+    show: false,
     webPreferences: {
       preload: path.join(APP_ROOT, 'electron_preload.cjs'),
       contextIsolation: true,
@@ -45,12 +48,55 @@ function createMainWindow() {
     },
   });
   mainWindow = win;
+  win.on('close', (event) => {
+    if (allowQuit) return;
+    event.preventDefault();
+    win.hide();
+    if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+  });
   win.on('closed', () => {
     mainWindow = null;
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.close();
   });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTrayIcon() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#07111f"/><path d="M8 34h12l5-15 10 30 7-21 5 6h9" fill="none" stroke="#30f2c6" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`).resize({ width: 24, height: 24 });
+}
+
+function createTray() {
+  if (tray) return tray;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip('LIFELINE');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open LIFELINE', click: showMainWindow },
+    { label: 'Minimize to Tray', click: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+      if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+    } },
+    { type: 'separator' },
+    { label: 'Quit', click: quitApplication },
+  ]));
+  tray.on('click', showMainWindow);
+  return tray;
+}
+
+function quitApplication() {
+  // This is deliberately the only normal path that is allowed to terminate
+  // LIFELINE. A close request from a window or renderer must leave the tray
+  // process and its background work running.
+  allowQuit = true;
+  app.quit();
 }
 
 function kindroidPanelState() {
@@ -552,11 +598,19 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
 });
 
 app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindow();
 });
 
-if (hasSingleInstanceLock) app.whenReady().then(createMainWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+if (hasSingleInstanceLock) app.whenReady().then(() => {
+  createTray();
+  createMainWindow();
+});
+app.on('activate', showMainWindow);
+app.on('before-quit', (event) => {
+  if (allowQuit) return;
+  event.preventDefault();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+});
+// Closing every visible window must not stop the background tray application.
+app.on('window-all-closed', () => {});
