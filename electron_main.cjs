@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage } = require('electron');
 const path = require('path');
 
 const APP_ROOT = __dirname;
@@ -6,11 +6,18 @@ const transcriptWindows = new Map();
 const transcriptCaptureTimers = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
+let tray = null;
+let allowQuit = false;
+let trayNoticeShown = false;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
 const KINDROID_HOME_URL = 'https://kindroid.ai/';
+// Keep the small PNG in code so installers and pull requests do not need a
+// separate binary image asset. Unlike the former SVG data URL, this decodes to
+// a native bitmap reliably on Windows, Linux, and macOS.
+const TRAY_ICON_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiElEQVR42mNgF5T/P5CYYdQBow4YdcCQc4DBp2MD5wCQ5TA88hyAbDk1HUETB5DiOKo7gNQQYiAn7vFZQmo0UdUB2EKJkCMYiDEA3SBSHYDPLAZSNGOzjNiQwmUe0SFAq2ghuy4gJWHSpDIacAdQq3QcdQDFDRJKK6eh7wBKW0mjjdJRBwy4AwCd+c2NtKBJNgAAAABJRU5ErkJggg==';
 // The same standalone userscript is injected by Electron and installed directly
 // in Tampermonkey, keeping a single source of truth for the call-page UI.
 const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8');
@@ -38,6 +45,7 @@ function createMainWindow() {
     width: 1500,
     height: 940,
     title: 'LIFELINE',
+    show: false,
     webPreferences: {
       preload: path.join(APP_ROOT, 'electron_preload.cjs'),
       contextIsolation: true,
@@ -45,12 +53,62 @@ function createMainWindow() {
     },
   });
   mainWindow = win;
+  win.on('close', (event) => {
+    if (allowQuit) return;
+    event.preventDefault();
+    win.hide();
+    if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+    showTrayNotice();
+  });
   win.on('closed', () => {
     mainWindow = null;
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.close();
   });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return tray;
+  const trayIcon = nativeImage.createFromBuffer(Buffer.from(TRAY_ICON_PNG, 'base64'));
+  tray = new Tray(trayIcon);
+  tray.setToolTip('LIFELINE');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open LIFELINE', click: showMainWindow },
+    { label: 'Minimize to Tray', click: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+      if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+    } },
+    { type: 'separator' },
+    { label: 'Quit', click: quitApplication },
+  ]));
+  tray.on('click', showMainWindow);
+  return tray;
+}
+
+function showTrayNotice() {
+  if (!tray || trayNoticeShown || process.platform !== 'win32') return;
+  trayNoticeShown = true;
+  tray.displayBalloon({
+    iconType: 'info',
+    title: 'LIFELINE is still running',
+    content: 'Use the LIFELINE system tray icon to reopen the main window or quit.',
+  });
+}
+
+function quitApplication() {
+  // This is deliberately the only normal path that is allowed to terminate
+  // LIFELINE. A close request from a window or renderer must leave the tray
+  // process and its background work running.
+  allowQuit = true;
+  app.quit();
 }
 
 function kindroidPanelState() {
@@ -552,11 +610,20 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
 });
 
 app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindow();
 });
 
-if (hasSingleInstanceLock) app.whenReady().then(createMainWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+if (hasSingleInstanceLock) app.whenReady().then(() => {
+  createTray();
+  createMainWindow();
+});
+app.on('activate', showMainWindow);
+app.on('before-quit', (event) => {
+  if (allowQuit) return;
+  event.preventDefault();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+  showTrayNotice();
+});
+// Closing every visible window must not stop the background tray application.
+app.on('window-all-closed', () => {});
