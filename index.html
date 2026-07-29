@@ -8,7 +8,12 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <div id="lifeline-root" aria-live="polite">Loading LIFELINE access portal…</div>
+    <div class="splash-screen" id="lifeline-splash" role="status" aria-label="LIFELINE is initializing">
+      <div class="splash-aurora" aria-hidden="true"></div><div class="splash-stars" aria-hidden="true"></div>
+      <div class="splash-core" aria-hidden="true"><span class="splash-orbit orbit-one"><i></i></span><span class="splash-orbit orbit-two"><i></i></span><span class="splash-orbit orbit-three"><i></i></span><div class="splash-monogram">L</div></div>
+      <div class="splash-copy"><p>CONNECTION ESTABLISHED</p><h1><span>LIFE</span>LINE</h1><div class="splash-loader"><i></i></div><small>Synchronizing your universe</small></div>
+    </div>
+    <div id="lifeline-root" class="app-loading" aria-live="polite">Loading LIFELINE access portal…</div>
     <noscript>LIFELINE requires JavaScript to load the bridge portal.</noscript>
     <script type="module" src="./main.js"></script>
   </body>

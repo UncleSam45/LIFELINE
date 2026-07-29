@@ -11,6 +11,44 @@ function ensureLifelineRoot() {
 
 const root = ensureLifelineRoot();
 
+function initializeMotionExperience() {
+  const splash = document.querySelector('#lifeline-splash');
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const revealNewContent = () => {
+    if (reducedMotion) return;
+    const selector = '.status, .asset-card, .field-grid > label, .person, .automation-entry, .news-card, .rawg-card, .relation-card';
+    root.querySelectorAll(selector).forEach((element, index) => {
+      element.classList.add('motion-reveal');
+      element.style.setProperty('--reveal-delay', `${Math.min(index, 12) * 42}ms`);
+    });
+  };
+  new MutationObserver(revealNewContent).observe(root, { childList: true });
+  document.addEventListener('pointermove', (event) => {
+    if (reducedMotion) return;
+    document.documentElement.style.setProperty('--pointer-x', `${(event.clientX / innerWidth) * 100}%`);
+    document.documentElement.style.setProperty('--pointer-y', `${(event.clientY / innerHeight) * 100}%`);
+  }, { passive: true });
+  document.addEventListener('pointerdown', (event) => {
+    if (reducedMotion || !event.target.closest('button')) return;
+    const ripple = document.createElement('span');
+    ripple.className = 'click-ripple'; ripple.style.left = `${event.clientX}px`; ripple.style.top = `${event.clientY}px`;
+    document.body.append(ripple); ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+  });
+  window.setTimeout(() => {
+    root.classList.remove('app-loading'); root.classList.add('app-ready');
+    if (!splash) return;
+    splash.classList.add('splash-exit');
+    const removeSplash = (event) => {
+      if (event && (event.target !== splash || event.animationName !== 'splashFadeOut')) return;
+      splash.remove();
+    };
+    splash.addEventListener('animationend', removeSplash);
+    window.setTimeout(() => removeSplash(), 1300);
+  }, reducedMotion ? 150 : 2600);
+}
+
+initializeMotionExperience();
+
 if (window.lifelineElectron?.getKindroidPanelState) {
   window.lifelineElectron.getKindroidPanelState().then((panelState) => {
     state.kindroidPanelOpen = Boolean(panelState?.open);
