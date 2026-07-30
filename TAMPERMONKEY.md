@@ -10,7 +10,7 @@ For Tampermonkey, create a new script and paste the complete contents of `lifeli
 
 ## Transcript bridge
 
-`lifeline-kindroid-transcript.user.js` brings the Electron group-call transcript bridge to normal browsers through Tampermonkey.
+`lifeline-kindroid-transcript.user.js` is the transcript bridge used without modification in both Tampermonkey and LIFELINE’s Electron Kindroid windows. Electron supplies a Tampermonkey-compatible isolated userscript environment, including scoped storage and the `GM_xmlhttpRequest` permission required for GitHub.
 
 GROUPMAKER initializes `transcripts/<group-id>/transcript.json` with its participant names when a group is created or updated. If a transcript already has an empty participant list, the userscript recovers the matching names from `config.json` before saving. It only detects speaker names from the Kindroid DOM when neither source contains GROUPMAKER metadata. Captures append transcript text without replacing authoritative participants.
 
@@ -33,3 +33,7 @@ The extractor activates the Transcript menu item at most once per call-page sess
 - A remembered token lives in Tampermonkey extension storage. Use **Forget token** after capture on a shared computer.
 - A 401 or 403 response normally means the token is expired, targets the wrong repository, or lacks **Contents: Read and write**.
 - The userscript is loaded on the wider `/v2/call/*` URL family so it survives Kindroid client-side navigation, but repository writes are deliberately restricted to `/v2/call/group/<group-id>/` pages to retain the Electron bridge's group transcript layout.
+
+## Electron integration
+
+Every Kindroid window opened by LIFELINE uses a sandboxed, context-isolated preload. At document idle it asks the Electron host for only the userscripts matching the current Kindroid URL and executes those scripts unchanged in the page world, just as a userscript manager would. The preload exposes only the Tampermonkey APIs declared by the transcript bridge; Node and Electron internals never enter the page. Transcript extraction, scheduling, merging, and UI behavior therefore live exclusively in the userscript rather than in Electron main-process page manipulation.
