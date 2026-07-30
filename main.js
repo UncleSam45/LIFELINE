@@ -179,9 +179,6 @@ const state = {
   groupmakerOpen: true,
   groupmakerMinimized: false,
   groupmakerBusy: false,
-  groupmakerTranscriptBusy: false,
-  groupmakerTranscriptStatus: '',
-  groupmakerTranscriptResult: null,
   apiStudioOpen: false,
   apiStudioCategory: 'individual_chat',
   apiStudioOperationKey: 'send_message',
@@ -1038,7 +1035,7 @@ function renderMemorySection(person) {
   const aiId = String(person?.ai_id || '').trim();
   const relatedSessions = groupmakerSessions().filter((session) => Array.isArray(session.ai_list) && session.ai_list.map(String).includes(aiId));
   const active = relatedSessions.filter((session) => !String(session.closed_at || '').trim() && !String(session.idle_at || '').trim());
-  return `<section class="memory-card tab-panel ${state.activeEntryTab === 'memory' ? 'active' : ''}"><div><p class="eyebrow">MEMORY</p><h3>Bridge transcript memory pipeline</h3><p class="sync-note">Electron call windows capture Kindroid call text with DOM injection and append it to ${BRIDGE_REPO}/transcripts. The LIFELINE Memory Manager can be launched later to restore its SQLite memory database from the bridge and process pending transcript files.</p></div><div class="generation-summary"><div><b>${escapeHtml(aiId || '—')}</b><span>AI ID</span></div><div><b>${active.length}</b><span>Open call sessions</span></div></div><div class="relations-grid"><section class="relation-card"><h4>Transcript destinations</h4><p>Group calls involving this person are saved under <code>transcripts/&lt;group_id&gt;/YYYY-MM-DD.txt</code> in the bridge repo.</p></section><section class="relation-card"><h4>Memory backups</h4><p>The memory manager restores and backs up <code>memory/lifeline_memory.latest.db</code>, with timestamped snapshots under <code>memory/snapshots/</code>.</p></section></div><pre>${escapeHtml(JSON.stringify(relatedSessions.map((session) => ({ group_id: session.group_id, names: session.names, touched_at: session.touched_at, closed_at: session.closed_at })), null, 2))}</pre></section>`;
+  return `<section class="memory-card tab-panel ${state.activeEntryTab === 'memory' ? 'active' : ''}"><div><p class="eyebrow">MEMORY</p><h3>Bridge transcript memory pipeline</h3><p class="sync-note">The bundled Tampermonkey-style userscript captures Kindroid call transcripts and appends them to ${BRIDGE_REPO}/transcripts. The LIFELINE Memory Manager can be launched later to restore its SQLite memory database from the bridge and process pending transcript files.</p></div><div class="generation-summary"><div><b>${escapeHtml(aiId || '—')}</b><span>AI ID</span></div><div><b>${active.length}</b><span>Open call sessions</span></div></div><div class="relations-grid"><section class="relation-card"><h4>Transcript destinations</h4><p>Group calls involving this person are saved under <code>transcripts/&lt;group_id&gt;/YYYY-MM-DD.txt</code> in the bridge repo.</p></section><section class="relation-card"><h4>Memory backups</h4><p>The memory manager restores and backs up <code>memory/lifeline_memory.latest.db</code>, with timestamped snapshots under <code>memory/snapshots/</code>.</p></section></div><pre>${escapeHtml(JSON.stringify(relatedSessions.map((session) => ({ group_id: session.group_id, names: session.names, touched_at: session.touched_at, closed_at: session.closed_at })), null, 2))}</pre></section>`;
 }
 
 function renderSettingsPanel() {
@@ -1298,60 +1295,11 @@ function renderGroupmakerWindow() {
   if (!state.groupmakerOpen) return '';
   const people = detectGroupmakerPeople(state.groupmakerNames);
   const active = activeGroupmakerSession();
-  const transcriptStatus = state.groupmakerTranscriptStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerTranscriptStatus)}</p>` : '';
   const groupmakerStatus = state.groupmakerStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p>` : '';
   const sessions = groupmakerSessions().filter((row) => !String(row.closed_at || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')));
-  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Activity</span><input id="gm-activity" value="${escapeHtml(state.groupmakerActivity)}" placeholder="Talking together at a patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="Persistent shared context for this group">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? `Update ${localCalendarDate()}` : `Create ${localCalendarDate()}`}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div>${groupmakerStatus}${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml(row.group_name || (row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
+  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label><div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label><span>Activity</span><input id="gm-activity" value="${escapeHtml(state.groupmakerActivity)}" placeholder="Talking together at a patio table" /></label><label><span>Group context</span><textarea id="gm-context" placeholder="Persistent shared context for this group">${escapeHtml(state.groupmakerContext)}</textarea></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? `Update ${localCalendarDate()}` : `Create ${localCalendarDate()}`}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div>${groupmakerStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml(row.group_name || (row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
-
-function groupmakerSessionHasGroupId(session) {
-  return Boolean(String(session?.group_id || '').trim());
-}
-
-function resolveGroupmakerTranscriptSession() {
-  const sessions = groupmakerSessions().filter(groupmakerSessionHasGroupId);
-  if (!sessions.length) return null;
-  const activeKey = String(state.config.groupmaker_active_session_key || '').trim();
-  const selected = sessions.find((row) => String(row.session_key || row.group_id || '').trim() === activeKey);
-  if (selected) return selected;
-  const active = activeGroupmakerSession();
-  if (groupmakerSessionHasGroupId(active)) return active;
-  return sessions.slice().sort((a, b) => String(b.touched_at || b.closed_at || '').localeCompare(String(a.touched_at || a.closed_at || '')))[0] || null;
-}
-
-function groupmakerChatUrl(groupId) {
-  return `https://kindroid.ai/v2/chat/group/${encodeURIComponent(String(groupId || '').trim())}/`;
-}
-
-async function fetchGroupmakerTranscript() {
-  if (state.groupmakerTranscriptBusy) return;
-  const session = resolveGroupmakerTranscriptSession();
-  if (!session?.group_id) { state.groupmakerTranscriptStatus = 'No GROUPMAKER session with a group_id is available.'; render(); return; }
-  if (!window.lifelineElectron?.fetchGroupTranscript) { state.groupmakerTranscriptStatus = 'Electron transcript bridge is not available.'; render(); return; }
-  const groupId = String(session.group_id || '').trim();
-  const participants = Array.isArray(session.names) ? session.names.map((name) => String(name || '').trim()).filter(Boolean) : [];
-  const capturedAt = new Date().toISOString();
-  const payload = { groupId, groupName: String(session.group_name || session.name || '').trim(), participants, capturedAt, accessKey: state.accessKey, chatUrl: groupmakerChatUrl(groupId) };
-  state.groupmakerTranscriptBusy = true;
-  state.groupmakerTranscriptResult = null;
-  state.groupmakerTranscriptStatus = 'Opening group transcript page…\nLoading older transcript entries…\nExtracting transcript bubbles…\nComparing with bridge history…\nSaving transcript to LIFELINE_BRIDGE…';
-  render();
-  try {
-    const result = await window.lifelineElectron.fetchGroupTranscript(payload);
-    state.groupmakerTranscriptResult = result;
-    if (!result?.ok) throw new Error(`${result?.stage || 'unknown'}: ${result?.message || 'Transcript capture failed.'}`);
-    session.last_transcript_capture = { captured_at: result.capturedAt, repo_path: result.repoPath, entries_found: result.bubblesFound, new_entries: result.newEntries, total_entries: result.totalEntries, participants_present: [...participants] };
-    session.touched_at = result.capturedAt;
-    state.groupmakerTranscriptStatus = `Transcript saved for ${result.groupName || 'GROUPMAKER group'}.\nGroup: ${result.groupId}\nParticipants: ${result.participants.join(', ') || '—'}\nExtraction method: ${result.selectorUsed || 'unknown'}\nEntries found: ${result.bubblesFound}\nNew entries saved: ${result.newEntries}\nTotal stored entries: ${result.totalEntries}\nPath: ${result.repoPath}`;
-    await saveBridgeQuiet('GROUPMAKER transcript metadata');
-  } catch (error) {
-    state.groupmakerTranscriptStatus = `Transcript capture failed at ${String(error.message || error).replace(/^([^:]+):/, '$1:')}`;
-  } finally {
-    state.groupmakerTranscriptBusy = false;
-    render();
-  }
-}
 
 function groupmakerPhysicalLocation() {
   return String(state.groupmakerLocation || '').trim();
