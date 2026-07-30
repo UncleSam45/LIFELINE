@@ -18,17 +18,27 @@ const KINDROID_HOME_URL = 'https://kindroid.ai/';
 // separate binary image asset. Unlike the former SVG data URL, this decodes to
 // a native bitmap reliably on Windows, Linux, and macOS.
 const TRAY_ICON_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiElEQVR42mNgF5T/P5CYYdQBow4YdcCQc4DBp2MD5wCQ5TA88hyAbDk1HUETB5DiOKo7gNQQYiAn7vFZQmo0UdUB2EKJkCMYiDEA3SBSHYDPLAZSNGOzjNiQwmUe0SFAq2ghuy4gJWHSpDIacAdQq3QcdQDFDRJKK6eh7wBKW0mjjdJRBwy4AwCd+c2NtKBJNgAAAABJRU5ErkJggg==';
-// The same standalone userscript is injected by Electron and installed directly
-// in Tampermonkey, keeping a single source of truth for the call-page UI.
-const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8');
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) app.quit();
 
 function kindroidWebPreferences() {
-  return { contextIsolation: true, nodeIntegration: false, partition: KINDROID_PARTITION };
+  return {
+    preload: path.join(APP_ROOT, 'electron_kindroid_preload.cjs'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    partition: KINDROID_PARTITION,
+  };
 }
+
+// Supply the current checked-in userscript to every Kindroid renderer. The
+// dedicated preload evaluates it in the page's main world early enough to
+// survive Kindroid's client-side routing; unlike did-finish-load, this also
+// covers call windows, popups, and routes that do not cause a document load.
+ipcMain.handle('lifeline:get-kindroid-toolkit-source', () => (
+  require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8')
+));
 
 function prepareKindroidSession() {
   if (!kindroidSessionReady) {
@@ -137,11 +147,6 @@ function createKindroidPanel() {
     if (!isMainFrame || errorCode === -3) return;
     if (validatedURL === KINDROID_HOME_URL || kindroidPanel?.isDestroyed()) return;
     kindroidPanel.loadURL(KINDROID_HOME_URL).catch(() => {});
-  });
-  kindroidPanel.webContents.on('did-finish-load', () => {
-    if (/^https:\/\/(?:www\.)?kindroid\.ai\//.test(kindroidPanel.webContents.getURL())) {
-      kindroidPanel.webContents.executeJavaScript(KINDROID_TOOLKIT_SOURCE).catch(() => {});
-    }
   });
   kindroidPanel.webContents.setWindowOpenHandler(() => ({
     action: 'allow',
