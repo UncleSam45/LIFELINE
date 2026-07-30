@@ -1325,32 +1325,13 @@ function groupmakerChatUrl(groupId) {
 }
 
 async function fetchGroupmakerTranscript() {
-  if (state.groupmakerTranscriptBusy) return;
   const session = resolveGroupmakerTranscriptSession();
   if (!session?.group_id) { state.groupmakerTranscriptStatus = 'No GROUPMAKER session with a group_id is available.'; render(); return; }
-  if (!window.lifelineElectron?.fetchGroupTranscript) { state.groupmakerTranscriptStatus = 'Electron transcript bridge is not available.'; render(); return; }
   const groupId = String(session.group_id || '').trim();
-  const participants = Array.isArray(session.names) ? session.names.map((name) => String(name || '').trim()).filter(Boolean) : [];
-  const capturedAt = new Date().toISOString();
-  const payload = { groupId, groupName: String(session.group_name || session.name || '').trim(), participants, capturedAt, accessKey: state.accessKey, chatUrl: groupmakerChatUrl(groupId) };
-  state.groupmakerTranscriptBusy = true;
-  state.groupmakerTranscriptResult = null;
-  state.groupmakerTranscriptStatus = 'Opening group transcript page…\nLoading older transcript entries…\nExtracting transcript bubbles…\nComparing with bridge history…\nSaving transcript to LIFELINE_BRIDGE…';
+  const url = `https://kindroid.ai/v2/call/group/${encodeURIComponent(groupId)}/`;
+  if (window.lifelineElectron?.openKindroidCall) await window.lifelineElectron.openKindroidCall({ url, groupId, session });
+  state.groupmakerTranscriptStatus = 'Transcript capture is now handled on the Kindroid page. Use the injected LIFELINE TRANSCRIPT panel to enter or remember the GitHub token and capture immediately; it will continue syncing automatically.';
   render();
-  try {
-    const result = await window.lifelineElectron.fetchGroupTranscript(payload);
-    state.groupmakerTranscriptResult = result;
-    if (!result?.ok) throw new Error(`${result?.stage || 'unknown'}: ${result?.message || 'Transcript capture failed.'}`);
-    session.last_transcript_capture = { captured_at: result.capturedAt, repo_path: result.repoPath, entries_found: result.bubblesFound, new_entries: result.newEntries, total_entries: result.totalEntries, participants_present: [...participants] };
-    session.touched_at = result.capturedAt;
-    state.groupmakerTranscriptStatus = `Transcript saved for ${result.groupName || 'GROUPMAKER group'}.\nGroup: ${result.groupId}\nParticipants: ${result.participants.join(', ') || '—'}\nExtraction method: ${result.selectorUsed || 'unknown'}\nEntries found: ${result.bubblesFound}\nNew entries saved: ${result.newEntries}\nTotal stored entries: ${result.totalEntries}\nPath: ${result.repoPath}`;
-    await saveBridgeQuiet('GROUPMAKER transcript metadata');
-  } catch (error) {
-    state.groupmakerTranscriptStatus = `Transcript capture failed at ${String(error.message || error).replace(/^([^:]+):/, '$1:')}`;
-  } finally {
-    state.groupmakerTranscriptBusy = false;
-    render();
-  }
 }
 
 function groupmakerPhysicalLocation() {

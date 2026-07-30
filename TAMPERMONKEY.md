@@ -2,7 +2,9 @@
 
 ## Call message toolkit
 
-`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
+Both checked-in userscripts are injected into Electron Kindroid pages after the document loads. Electron supplies the small Tampermonkey-compatible storage and cross-origin request bridge required by the transcript script; the script itself owns transcript extraction, merging, and synchronization. The former hardcoded Electron transcript DOM manipulation path is no longer invoked.
+
+`lifeline-kindroid-call-toolkit.user.js` is the standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
 
 The red **SPEAKER MONITOR** control at the bottom left is disabled by default. Click it to turn it green and begin watching Kindroid's active-speaker tile. If the same detected speaker remains active for one minute, the toolkit sends `*CONTINUES CONVERSATION*` and immediately starts a fresh one-minute interval even when the active speaker does not change. Click the control again to stop monitoring.
 
