@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.2
+// @version      1.2.5
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -33,7 +33,7 @@
   let autoCapture = true;
   let lastUrl = location.href;
   let ui = null;
-  let transcriptPanelAttemptedForCall = '';
+  let transcriptPanelActivatedForCall = '';
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -188,6 +188,9 @@
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
+  // Kindroid's call controls rely on the complete pointer-like activation
+  // sequence. Use it only while opening Transcript; successful activation is
+  // remembered below so synchronization never clicks page controls afterward.
   function clickElement(element) {
     element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
     element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
@@ -204,6 +207,8 @@
   }
 
   function findTranscriptOption() {
+    // Kindroid has shipped the Transcript choice both with and without an
+    // explicit menu role, so exact-text buttons must remain valid candidates.
     const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
@@ -217,15 +222,19 @@
     const rowSelectors = ['[class*="call-transcript-panel-v2_row__"]', '[class*="call-transcript-panel_row__"]', '[class*="transcript"][class*="row"]'];
     let rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
     const callId = groupId();
-    if (!rows.length && transcriptPanelAttemptedForCall !== callId) {
-      transcriptPanelAttemptedForCall = callId;
+    if (rows.length) transcriptPanelActivatedForCall = callId;
+    if (!rows.length && transcriptPanelActivatedForCall !== callId) {
       const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
       const button = menuButtons[0];
       if (button) {
         clickElement(button);
         let option = null;
         for (let attempt = 0; attempt < 16 && !option; attempt += 1) { await sleep(attempt ? 150 : 350); option = findTranscriptOption(); }
-        if (option) { clickElement(option); await sleep(900); }
+        if (option) {
+          clickElement(option);
+          transcriptPanelActivatedForCall = callId;
+          await sleep(900);
+        }
       }
     }
     if (!rows.length) {

@@ -2,7 +2,9 @@
 
 ## Call message toolkit
 
-`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Messages are sent exactly as saved, so OOC directives and roleplay asterisks are both supported.
+`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
+
+The red **SPEAKER MONITOR** control at the bottom left is disabled by default. Click it to turn it green and begin watching Kindroid's active-speaker tile. If the same detected speaker remains active for one minute, the toolkit sends `*CONTINUES CONVERSATION*` and immediately starts a fresh one-minute interval even when the active speaker does not change. Click the control again to stop monitoring.
 
 For Tampermonkey, create a new script and paste the complete contents of `lifeline-kindroid-call-toolkit.user.js`, or install that raw file directly. It has no external `@require`; the metadata and complete implementation live in the same valid userscript file.
 
@@ -22,6 +24,8 @@ The frontend does not navigate the prepared browser/Electron tab to Kindroid unt
 4. Open any Kindroid group call URL (`https://kindroid.ai/v2/call/group/<group-id>/`). Enter the token in the floating **LIFELINE TRANSCRIPT** panel and select **Capture now**. Select **Remember in Tampermonkey** only on a trusted device.
 
 After a token is entered, the script retries capture every three seconds until the transcript is available and then synchronizes once per minute. It opens Kindroid's Transcript panel, extracts only transcript-row text, preserves the Electron bridge's version 2 JSON shape, merges overlapping rows, and writes `transcripts/<group-id>/transcript.json` on the bridge's `main` branch. GitHub SHA conflicts—including the `does not match <sha>` response—cause cache-bypassing reads and up to four fresh merge attempts, so simultaneous captures retain one another's entries instead of repeatedly failing against an obsolete revision.
+
+The extractor keeps trying until Kindroid's Transcript option has actually been activated, rather than treating a too-early attempt before the call controls load as success. Once activation succeeds, it records that state for the call-page session and later synchronization passes only read transcript rows without clicking any page controls.
 
 ## Security and troubleshooting
 
