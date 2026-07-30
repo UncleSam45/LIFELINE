@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.2
+// @version      1.2.3
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -188,29 +188,33 @@
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
-  function clickElement(element) {
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-    element.click();
-  }
+  // Calling mousedown, mouseup, and click separately can make React/Chakra
+  // controls handle one intended action multiple times. A native click already
+  // performs the complete activation and must be the only event we initiate.
+  function clickElement(element) { element.click(); }
 
   function isThreeDots(button) {
     if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+    const popupType = button.getAttribute('aria-haspopup');
+    if (popupType !== 'listbox' && popupType !== 'menu' && popupType !== 'true') return false;
     const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
-    if (button.getAttribute('aria-haspopup') === 'listbox' && (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5'))) return true;
+    if (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5')) return true;
     const dots = [...(button.querySelector("svg[viewBox='0 0 24 24']")?.querySelectorAll('circle') || [])]
       .map((circle) => `${circle.getAttribute('cx')},${circle.getAttribute('cy')},${circle.getAttribute('r')}`).sort();
     return dots.join('|') === '12,12,1|19,12,1|5,12,1';
   }
 
   function findTranscriptOption() {
-    const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
+    // Only inspect menu/listbox choices. Searching every button on the page can
+    // accidentally activate an unrelated Kindroid or LIFELINE control whose
+    // text happens to contain "Transcript".
+    const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem']")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
       const path = option.querySelector('svg path')?.getAttribute('d');
       return !path || path.trim() === TRANSCRIPT_ICON_PATH;
-    }) || [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, button p, [role='option'], [role='menuitem'], button")]
-      .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)))?.closest("[role='option'], [role='menuitem'], button");
+    }) || [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, [role='option'], [role='menuitem']")]
+      .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)))?.closest("[role='option'], [role='menuitem']");
   }
 
   async function extractTranscript() {
