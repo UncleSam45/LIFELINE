@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -21,9 +22,101 @@ MAIN_JS_PATH = APP_ROOT / "main.js"
 ELECTRON_MAIN_PATH = APP_ROOT / "electron_main.cjs"
 ELECTRON_PRELOAD_PATH = APP_ROOT / "electron_preload.cjs"
 INDEX_PATH = APP_ROOT / "index.html"
+MEMORY_MANAGER_PATH = APP_ROOT / "lifeline_memory_manager.py"
+RUNTIME_DIR = APP_ROOT / ".lifeline_runtime"
 ELECTRON_VERSION = "32.2.7"
 ELECTRON_CACHE = APP_ROOT / ".lifeline_electron" / f"electron-v{ELECTRON_VERSION}"
 WINDOWS_STATUS_DLL_NOT_FOUND = 0xC0000135
+
+
+def _background_process_options(log_name: str) -> tuple[dict, object]:
+    """Return platform-correct options and an owned log stream for a service."""
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    log = (RUNTIME_DIR / log_name).open("a", encoding="utf-8")
+    options: dict = {
+        "cwd": str(APP_ROOT),
+        "stdin": subprocess.DEVNULL,
+        "stdout": log,
+        "stderr": subprocess.STDOUT,
+        "close_fds": os.name != "nt",
+    }
+    if os.name == "nt":
+        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    return options, log
+
+
+def _spawn_background(command: list[str], log_name: str) -> subprocess.Popen:
+    options, log = _background_process_options(log_name)
+    try:
+        return subprocess.Popen(command, **options)
+    finally:
+        # Popen duplicates/inherits this descriptor; the launcher must not retain it.
+        log.close()
+
+
+def _ollama_is_running() -> bool:
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=1) as response:
+            return 200 <= response.status < 300
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def _ollama_executable() -> Path | None:
+    configured = os.environ.get("LIFELINE_OLLAMA_BINARY", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.exists():
+            raise FileNotFoundError(f"Configured Ollama binary does not exist: {candidate}")
+        return candidate
+
+    on_path = shutil.which("ollama")
+    if on_path:
+        return Path(on_path)
+
+    if os.name == "nt":
+        roots = filter(None, (
+            os.environ.get("LOCALAPPDATA"),
+            str(Path(os.environ.get("USERPROFILE", "")) / "AppData" / "Local") if os.environ.get("USERPROFILE") else None,
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ))
+        for root in roots:
+            for relative in ("Programs/Ollama/ollama.exe", "Programs/Ollama/Ollama app.exe", "Ollama/ollama.exe"):
+                candidate = Path(root) / relative
+                if candidate.exists():
+                    return candidate
+    return None
+
+
+def _launch_ollama() -> None:
+    if _ollama_is_running():
+        print("Ollama is already running.")
+        return
+    executable = _ollama_executable()
+    if executable is None:
+        print("[WARN] Ollama is not installed or was not found; the Memory Manager will retry it.", file=sys.stderr)
+        return
+    command = [str(executable)]
+    if executable.name.lower() in {"ollama", "ollama.exe"}:
+        command.append("serve")
+    _spawn_background(command, "ollama.log")
+    print(f"Launched Ollama from {executable}.")
+
+
+def _launch_memory_manager() -> None:
+    if not MEMORY_MANAGER_PATH.is_file():
+        raise FileNotFoundError(f"Expected LIFELINE Memory Manager at {MEMORY_MANAGER_PATH}")
+    _spawn_background([sys.executable, str(MEMORY_MANAGER_PATH)], "memory-manager.log")
+    print("Launched LIFELINE Memory Manager.")
+
+
+def _launch_support_services() -> None:
+    """Start every required companion whenever the main LIFELINE app starts."""
+    _launch_ollama()
+    _launch_memory_manager()
 
 
 
@@ -116,6 +209,7 @@ def _is_windows_dll_load_failure(error: subprocess.CalledProcessError) -> bool:
 
 def main() -> None:
     _ensure_frontend_entrypoint()
+    _launch_support_services()
     electron = _electron_executable()
     try:
         _run_electron(electron)

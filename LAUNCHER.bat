@@ -16,21 +16,13 @@ if exist ".venv\Scripts\activate.bat" (
     exit /b 1
 )
 
-REM Launch both scripts in separate windows so transcribe starts even if main.py keeps running
-echo Launching main.py...
-start "MEDIATOR Main" python main.py
-if not "%ERRORLEVEL%"=="0" (
-    echo [ERROR] Failed to launch main.py.
+REM main.py is the single launcher. It starts Ollama and the LIFELINE Memory
+REM Manager before opening Electron, so every entry point behaves identically.
+echo Launching LIFELINE, Memory Manager, and Ollama...
+python main.py
+set "LIFELINE_EXIT=%ERRORLEVEL%"
+if not "%LIFELINE_EXIT%"=="0" (
+    echo [ERROR] LIFELINE exited with code %LIFELINE_EXIT%.
     pause
-    exit /b %ERRORLEVEL%
 )
-
-echo Launching transcribe.py...
-start "MEDIATOR Transcribe" python transcribe.py
-if not "%ERRORLEVEL%"=="0" (
-    echo [ERROR] Failed to launch transcribe.py.
-    pause
-    exit /b %ERRORLEVEL%
-)
-
-exit /b 0
+exit /b %LIFELINE_EXIT%
