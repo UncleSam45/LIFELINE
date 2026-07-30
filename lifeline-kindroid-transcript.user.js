@@ -199,8 +199,10 @@
 
   function isThreeDots(button) {
     if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+    const popupType = button.getAttribute('aria-haspopup');
+    if (popupType !== 'listbox' && popupType !== 'menu' && popupType !== 'true') return false;
     const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
-    if (button.getAttribute('aria-haspopup') === 'listbox' && (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5'))) return true;
+    if (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5')) return true;
     const dots = [...(button.querySelector("svg[viewBox='0 0 24 24']")?.querySelectorAll('circle') || [])]
       .map((circle) => `${circle.getAttribute('cx')},${circle.getAttribute('cy')},${circle.getAttribute('r')}`).sort();
     return dots.join('|') === '12,12,1|19,12,1|5,12,1';
@@ -214,8 +216,8 @@
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
       const path = option.querySelector('svg path')?.getAttribute('d');
       return !path || path.trim() === TRANSCRIPT_ICON_PATH;
-    }) || [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, button p, [role='option'], [role='menuitem'], button")]
-      .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)))?.closest("[role='option'], [role='menuitem'], button");
+    }) || [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, [role='option'], [role='menuitem']")]
+      .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)))?.closest("[role='option'], [role='menuitem']");
   }
 
   async function extractTranscript() {
