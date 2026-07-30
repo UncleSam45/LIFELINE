@@ -25,7 +25,7 @@ The frontend does not navigate the prepared browser/Electron tab to Kindroid unt
 
 After a token is entered, the script retries capture every three seconds until the transcript is available and then synchronizes once per minute. It opens Kindroid's Transcript panel, extracts only transcript-row text, preserves the Electron bridge's version 2 JSON shape, merges overlapping rows, and writes `transcripts/<group-id>/transcript.json` on the bridge's `main` branch. GitHub SHA conflicts—including the `does not match <sha>` response—cause cache-bypassing reads and up to four fresh merge attempts, so simultaneous captures retain one another's entries instead of repeatedly failing against an obsolete revision.
 
-The extractor activates the Transcript menu item at most once per call-page session. It uses one native click for the menu and one for the Transcript option, then only reads transcript rows; it never searches or clicks arbitrary page buttons during later synchronization passes.
+The extractor activates the Transcript menu item at most once per call-page session. It recognizes both Kindroid menu variants—with or without explicit accessibility menu roles—uses one native click for the menu and one for the exact `Transcript` option, and then only reads transcript rows during later synchronization passes.
 
 ## Security and troubleshooting
 

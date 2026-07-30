@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.3
+// @version      1.2.4
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -205,10 +205,9 @@
   }
 
   function findTranscriptOption() {
-    // Only inspect menu/listbox choices. Searching every button on the page can
-    // accidentally activate an unrelated Kindroid or LIFELINE control whose
-    // text happens to contain "Transcript".
-    const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem']")];
+    // Kindroid has shipped the Transcript choice both with and without an
+    // explicit menu role, so exact-text buttons must remain valid candidates.
+    const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
       const path = option.querySelector('svg path')?.getAttribute('d');
