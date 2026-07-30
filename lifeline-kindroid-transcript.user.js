@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.2
+// @version      1.2.4
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -188,11 +188,10 @@
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
-  function clickElement(element) {
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-    element.click();
-  }
+  // Calling mousedown, mouseup, and click separately can make React/Chakra
+  // controls handle one intended action multiple times. A native click already
+  // performs the complete activation and must be the only event we initiate.
+  function clickElement(element) { element.click(); }
 
   function isThreeDots(button) {
     if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
@@ -204,6 +203,8 @@
   }
 
   function findTranscriptOption() {
+    // Kindroid has shipped the Transcript choice both with and without an
+    // explicit menu role, so exact-text buttons must remain valid candidates.
     const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
