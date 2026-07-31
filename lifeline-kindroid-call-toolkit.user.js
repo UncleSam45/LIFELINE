@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kindroid Inline Replies (LIFELINE)
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      2.2.1
+// @version      2.2.2
 // @description  Large quick-reply console with on-the-fly replies and an active-speaker continuation monitor.
 // @match        https://kindroid.ai/call*
 // @match        https://kindroid.ai/groupchat/*/call*
@@ -31,7 +31,7 @@
   ];
   const COMPOSER_SELECTORS = ['textarea:not([disabled]):not([readonly])', 'input[type="text"]:not([disabled]):not([readonly])', 'input[type="search"]:not([disabled]):not([readonly])', '[contenteditable="true"]', '[role="textbox"]'];
   const ACTIVE_SPEAKER_SUFFIX = ' (active speaker)';
-  const CONTINUATION_DELAY_MS = 60000;
+  const CONTINUATION_DELAY_MS = 120000;
   let sendLockUntil = 0;
 
   const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -136,10 +136,10 @@
       speakerSince = now;
       send('*CONTINUES CONVERSATION*').then(() => {
         showStatus('Automatic continuation sent.', 'success');
-        monitorDetail.textContent = `${activeSpeaker} · timer restarted (60s)`;
+        monitorDetail.textContent = `${activeSpeaker} · timer restarted (120s)`;
       }).catch((error) => {
         showStatus(`Monitor: ${error.message}`, 'error');
-        monitorDetail.textContent = `${activeSpeaker} · retrying in 60s`;
+        monitorDetail.textContent = `${activeSpeaker} · retrying in 120s`;
       });
     };
     const render = () => {
