@@ -102,21 +102,59 @@ def _launch_ollama() -> None:
     command = [str(executable)]
     if executable.name.lower() in {"ollama", "ollama.exe"}:
         command.append("serve")
-    _spawn_background(command, "ollama.log")
-    print(f"Launched Ollama from {executable}.")
+    process = _spawn_background(command, "ollama.log")
+    _verify_background_start(process, "Ollama", "ollama.log")
+    print(f"Launched Ollama from {executable}.", flush=True)
 
 
 def _launch_memory_manager() -> None:
     if not MEMORY_MANAGER_PATH.is_file():
         raise FileNotFoundError(f"Expected LIFELINE Memory Manager at {MEMORY_MANAGER_PATH}")
-    _spawn_background([sys.executable, str(MEMORY_MANAGER_PATH)], "memory-manager.log")
-    print("Launched LIFELINE Memory Manager.")
+    process = _spawn_background([sys.executable, str(MEMORY_MANAGER_PATH)], "memory-manager.log")
+    _verify_background_start(process, "LIFELINE Memory Manager", "memory-manager.log")
+    print("Launched LIFELINE Memory Manager.", flush=True)
+
+
+def _verify_background_start(process: subprocess.Popen, service_name: str, log_name: str) -> None:
+    """Fail loudly when a companion exits during its initial Python/app setup."""
+    try:
+        return_code = process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        return
+
+    log_path = RUNTIME_DIR / log_name
+    detail = ""
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if lines:
+            detail = f" Last log line: {lines[-1]}"
+    except OSError:
+        pass
+    raise RuntimeError(
+        f"{service_name} exited during startup with code {return_code}. "
+        f"See {log_path}.{detail}"
+    )
 
 
 def _launch_support_services() -> None:
-    """Start every required companion whenever the main LIFELINE app starts."""
-    _launch_ollama()
-    _launch_memory_manager()
+    """Attempt every companion even when another companion fails to start."""
+    failures = []
+    for service_name, launcher in (
+        ("Ollama", _launch_ollama),
+        ("LIFELINE Memory Manager", _launch_memory_manager),
+    ):
+        try:
+            launcher()
+        except Exception as error:
+            failures.append(f"{service_name}: {error}")
+            print(f"[ERROR] Could not launch {service_name}: {error}", file=sys.stderr, flush=True)
+    if failures:
+        print(
+            "[WARN] LIFELINE will still open; companion startup details are in "
+            f"{RUNTIME_DIR}. Failures: {'; '.join(failures)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 

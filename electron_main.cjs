@@ -4,6 +4,7 @@ const path = require('path');
 const APP_ROOT = __dirname;
 const transcriptWindows = new Map();
 const transcriptCaptureTimers = new Map();
+const transcriptWriteQueues = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
 let tray = null;
@@ -290,21 +291,35 @@ async function writeTranscriptFile(token, repoPath, doc, sha) {
   }, 'github_write');
 }
 
-async function saveMergedTranscript(token, repoPath, mergeInput) {
-  let current;
-  try { current = await readTranscriptFile(token, repoPath); } catch (error) { throw Object.assign(error, { stage: error.parse ? 'github_parse' : 'github_read' }); }
-  let merged = mergeTranscript(current.doc, mergeInput);
-  if (!merged.changed) return merged;
-  try {
-    await writeTranscriptFile(token, repoPath, merged.doc, current.sha);
-    return merged;
-  } catch (error) {
-    if (error.status !== 409) throw Object.assign(error, { stage: 'github_write' });
-    current = await readTranscriptFile(token, repoPath);
-    merged = mergeTranscript(current.doc, mergeInput);
+function isTranscriptShaMismatch(error) {
+  return Number(error?.status) === 409 || /does not match/i.test(String(error?.message || ''));
+}
+
+async function saveMergedTranscriptNow(token, repoPath, mergeInput, maxAttempts = 5) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let current;
+    try { current = await readTranscriptFile(token, repoPath); } catch (error) { throw Object.assign(error, { stage: error.parse ? 'github_parse' : 'github_read' }); }
+    const merged = mergeTranscript(current.doc, mergeInput);
     if (!merged.changed) return merged;
-    await writeTranscriptFile(token, repoPath, merged.doc, current.sha);
-    return merged;
+    try {
+      await writeTranscriptFile(token, repoPath, merged.doc, current.sha);
+      return merged;
+    } catch (error) {
+      if (!isTranscriptShaMismatch(error) || attempt === maxAttempts - 1) throw Object.assign(error, { stage: 'github_write' });
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
+  throw Object.assign(new Error(`Unable to update ${repoPath}`), { stage: 'github_write' });
+}
+
+async function saveMergedTranscript(token, repoPath, mergeInput) {
+  const priorWrite = transcriptWriteQueues.get(repoPath) || Promise.resolve();
+  const write = priorWrite.catch(() => {}).then(() => saveMergedTranscriptNow(token, repoPath, mergeInput));
+  transcriptWriteQueues.set(repoPath, write);
+  try {
+    return await write;
+  } finally {
+    if (transcriptWriteQueues.get(repoPath) === write) transcriptWriteQueues.delete(repoPath);
   }
 }
 

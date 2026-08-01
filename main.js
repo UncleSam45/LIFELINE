@@ -90,6 +90,7 @@ const REMEMBERED_KINDROID_CONNECTED = REMEMBERED_KINDROID_API_KEY.trim().startsW
 const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true' && Boolean(REMEMBERED_ACCESS_KEY.trim());
 let groupmakerDraftSaveTimer = null;
 let groupmakerAutoSyncTimer = null;
+let bridgeWriteQueue = Promise.resolve();
 const GROUPMAKER_AUTO_SYNC_DELAY_MS = 5000;
 const groupmakerKindroidTabs = new Set();
 
@@ -373,14 +374,19 @@ function scheduleGroupmakerAutoSync() {
   if (!state.groupmakerAutoMode) return;
   groupmakerAutoSyncTimer = setTimeout(() => {
     groupmakerAutoSyncTimer = null;
-    if (!state.groupmakerBusy) syncGroupmaker({ automatic: true, openCall: false });
+    // Auto mode must use the exact same tested path as the Update/Create
+    // button. Do not duplicate or alter GROUPMAKER synchronization here.
+    document.querySelector('#gm-sync')?.click();
   }, GROUPMAKER_AUTO_SYNC_DELAY_MS);
 }
 
 function scheduleGroupmakerDraftSave() {
   persistGroupmakerDraft();
-  if (!state.authenticated) return;
   if (groupmakerDraftSaveTimer) clearTimeout(groupmakerDraftSaveTimer);
+  groupmakerDraftSaveTimer = null;
+  // Auto mode's single Update/Create click persists the same draft. A second,
+  // earlier GitHub write only races that update and causes needless UI churn.
+  if (!state.authenticated || state.groupmakerAutoMode) return;
   groupmakerDraftSaveTimer = setTimeout(() => {
     groupmakerDraftSaveTimer = null;
     saveBridgeQuiet('Save GROUPMAKER draft');
@@ -751,37 +757,40 @@ async function githubRequest(url, options = {}) {
   return payload;
 }
 
-async function ensureGroupTranscript(groupId, participants, retryOnConflict = true) {
+async function ensureGroupTranscript(groupId, participants, maxAttempts = 5) {
   const id = String(groupId || '').trim();
   const names = [...new Set((Array.isArray(participants) ? participants : []).map((name) => String(name || '').trim()).filter(Boolean))];
   if (!id || !names.length) return;
   const path = `transcripts/${id}/transcript.json`;
-  let sha = '';
-  let current = null;
-  try {
-    const file = await githubRequest(bridgeUrl(path));
-    sha = String(file.sha || '');
-    current = decodeBase64(file.content || '');
-  } catch (error) {
-    if (!/not found/i.test(String(error?.message || ''))) throw error;
-  }
-  const base = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
-  const transcript = Array.isArray(base.transcript) ? base.transcript : [];
-  const doc = { ...base, version: 2, group_id: id, participants: names, transcript };
-  if (JSON.stringify(base) === JSON.stringify(doc)) return;
-  try {
-    await githubRequest(bridgeUrl(path, false), {
-      method: 'PUT',
-      body: JSON.stringify({
-        message: `Initialize group transcript ${id} participants via LIFELINE frontend`,
-        branch: BRIDGE_BRANCH,
-        content: encodeBase64(doc),
-        ...(sha ? { sha } : {}),
-      }),
-    });
-  } catch (error) {
-    if (!retryOnConflict || !isGithubShaMismatch(error)) throw error;
-    await ensureGroupTranscript(id, names, false);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let sha = '';
+    let current = null;
+    try {
+      const file = await githubRequest(bridgeUrl(path));
+      sha = String(file.sha || '');
+      current = decodeBase64(file.content || '');
+    } catch (error) {
+      if (!/not found/i.test(String(error?.message || ''))) throw error;
+    }
+    const base = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
+    const transcript = Array.isArray(base.transcript) ? base.transcript : [];
+    const doc = { ...base, version: 2, group_id: id, participants: names, transcript };
+    if (JSON.stringify(base) === JSON.stringify(doc)) return;
+    try {
+      await githubRequest(bridgeUrl(path, false), {
+        method: 'PUT',
+        body: JSON.stringify({
+          message: `Initialize group transcript ${id} participants via LIFELINE frontend`,
+          branch: BRIDGE_BRANCH,
+          content: encodeBase64(doc),
+          ...(sha ? { sha } : {}),
+        }),
+      });
+      return;
+    } catch (error) {
+      if (!isGithubShaMismatch(error) || attempt === maxAttempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
   }
 }
 
@@ -816,7 +825,7 @@ async function refreshBridgeSha() {
   return state.bridgeSha;
 }
 
-async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
+async function writeBridgeConfigNow(reason, retryOnShaMismatch = true) {
   if (!state.bridgeSha) await refreshBridgeSha();
   try {
     const payload = await githubRequest(bridgeUrl(BRIDGE_PATH, false), {
@@ -850,6 +859,15 @@ async function writeBridgeConfig(reason, retryOnShaMismatch = true) {
     state.bridgeSha = payload.content?.sha || state.bridgeSha;
     return { payload, retried: true };
   }
+}
+
+function writeBridgeConfig(reason, retryOnShaMismatch = true) {
+  // GitHub's Contents API rejects concurrent writes that use the same blob
+  // SHA. Funnel every config.json update through one queue so draft saves,
+  // manual updates, and auto-mode updates cannot invalidate each other.
+  const write = bridgeWriteQueue.then(() => writeBridgeConfigNow(reason, retryOnShaMismatch));
+  bridgeWriteQueue = write.catch(() => {});
+  return write;
 }
 
 function decodeBase64(content) {
