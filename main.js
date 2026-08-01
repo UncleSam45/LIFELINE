@@ -375,7 +375,9 @@ function scheduleGroupmakerAutoSync() {
   if (!state.groupmakerAutoMode) return;
   groupmakerAutoSyncTimer = setTimeout(() => {
     groupmakerAutoSyncTimer = null;
-    if (!state.groupmakerBusy) syncGroupmaker({ automatic: true, openCall: true });
+    // Auto mode must use the exact same tested path as the Update/Create
+    // button. Do not duplicate or alter GROUPMAKER synchronization here.
+    document.querySelector('#gm-sync')?.click();
   }, GROUPMAKER_AUTO_SYNC_DELAY_MS);
 }
 

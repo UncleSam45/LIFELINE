@@ -106,9 +106,9 @@ Memory Manager fails with an import error, install `PySide6`, `requests`, and
 ## GROUPMAKER auto mode
 
 Auto mode waits five seconds after the last GROUPMAKER field edit, saves the
-active session, prepares transcript metadata, and opens or focuses that group's
-call window. An existing call window is reused without navigating or reloading
-it. Auto mode never closes other group call windows or conversations.
+active session, and programmatically clicks the existing Create/Update button.
+This deliberately uses the same validation, API updates, transcript preparation,
+and call-opening behavior as a manual button click.
 
 ## Memory Manager data
 
