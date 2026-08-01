@@ -91,7 +91,9 @@ const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KE
 let groupmakerDraftSaveTimer = null;
 let groupmakerAutoSyncTimer = null;
 const GROUPMAKER_AUTO_SYNC_DELAY_MS = 5000;
-const groupmakerKindroidTabs = new Set();
+// Browser fallback only: keep one call tab per group without ever taking
+// ownership of (and closing) conversations the user already has open.
+const groupmakerKindroidTabs = new Map();
 
 const DIRECTORY_API_METADATA = {
   name: 'Officially synchronized: update_info.ai_name',
@@ -373,7 +375,7 @@ function scheduleGroupmakerAutoSync() {
   if (!state.groupmakerAutoMode) return;
   groupmakerAutoSyncTimer = setTimeout(() => {
     groupmakerAutoSyncTimer = null;
-    if (!state.groupmakerBusy) syncGroupmaker({ automatic: true, openCall: false });
+    if (!state.groupmakerBusy) syncGroupmaker({ automatic: true, openCall: true });
   }, GROUPMAKER_AUTO_SYNC_DELAY_MS);
 }
 
@@ -524,19 +526,8 @@ function kindroidGroupCallUrl(groupId) {
   return `https://kindroid.ai/v2/call/group/${encodeURIComponent(cleanGroupId)}/`;
 }
 
-function closePriorGroupmakerTabs() {
-  for (const tab of [...groupmakerKindroidTabs]) {
-    if (!tab || tab.closed) {
-      groupmakerKindroidTabs.delete(tab);
-      continue;
-    }
-    try { tab.close(); } catch {}
-    groupmakerKindroidTabs.delete(tab);
-  }
-}
-
-function rememberGroupmakerTab(tabRef) {
-  if (tabRef && !tabRef.closed) groupmakerKindroidTabs.add(tabRef);
+function rememberGroupmakerTab(groupId, tabRef) {
+  if (tabRef && !tabRef.closed) groupmakerKindroidTabs.set(String(groupId), tabRef);
 }
 
 function openPreparedGroupmakerTab(tabRef, groupId) {
@@ -546,14 +537,20 @@ function openPreparedGroupmakerTab(tabRef, groupId) {
     window.lifelineElectron.openKindroidCall({ url, groupId, accessKey: state.accessKey, session: reconnectGroupmakerSession() }).catch(() => {});
     return true;
   }
+  const rememberedTab = groupmakerKindroidTabs.get(String(groupId));
+  if (rememberedTab && !rememberedTab.closed) {
+    try { rememberedTab.focus(); } catch {}
+    return true;
+  }
+  if (rememberedTab?.closed) groupmakerKindroidTabs.delete(String(groupId));
   if (tabRef && !tabRef.closed) {
     tabRef.location.href = url;
     try { tabRef.focus(); } catch {}
-    rememberGroupmakerTab(tabRef);
+    rememberGroupmakerTab(groupId, tabRef);
     return true;
   }
   const opened = window.open(url, '_blank');
-  rememberGroupmakerTab(opened);
+  rememberGroupmakerTab(groupId, opened);
   return Boolean(opened);
 }
 
@@ -1505,7 +1502,6 @@ async function syncGroupmaker({ automatic = false, openCall = true } = {}) {
   const toolKey = active ? 'group_update' : 'create_groupchat_current_discovery';
   const configurationChanged = groupmakerConfigurationChanged(active, { aiList, groupName, context, activity });
   const priorActive = active ? { ...active, ai_list: [...validAiIds(active.ai_list || [])] } : null;
-  closePriorGroupmakerTabs();
   const preparedTab = !openCall || window.lifelineElectron?.openKindroidCall ? null : window.open('about:blank', '_blank');
   if (preparedTab) preparedTab.document.title = 'Opening Kindroid group…';
   state.groupmakerBusy = true; state.groupmakerStatus = `${active ? 'Updating' : 'Creating'} GROUPMAKER session…`; render();
