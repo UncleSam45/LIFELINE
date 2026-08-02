@@ -52,3 +52,17 @@ def test_directory_sync_has_duplicate_create_lock_and_three_actions():
 def test_manual_journal_records_target_ai_id():
     assert "record.remote_ai_id = record.remote_status === 'synced'" in MAIN_JS
     assert "operation:'manual'" in MAIN_JS
+
+
+def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
+    assert "function familyMemoryForEntry(entry)" in MAIN_JS
+    assert "cleanGenerationIds(child.parents, childId)" in MAIN_JS
+    assert "cleanGenerationIds(candidate.children, candidateId).includes(childId)" in MAIN_JS
+    assert "The children are" in MAIN_JS
+    assert "sentences.join('\\n')" in MAIN_JS
+    assert "saveBridge('Update family memory from GENERATIONS')" in MAIN_JS
+
+
+def test_memory_field_renders_family_update_button_and_click_handler():
+    assert 'id="update-family-memory"' in MAIN_JS
+    assert "updateFamilyMemory(current)" in MAIN_JS
