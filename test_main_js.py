@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 MAIN_JS = (Path(__file__).parent / "main.js").read_text(encoding="utf-8")
+STYLES_CSS = (Path(__file__).parent / "styles.css").read_text(encoding="utf-8")
 
 
 def test_groupmaker_auto_mode_clicks_existing_sync_button():
@@ -66,3 +67,15 @@ def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
 def test_memory_field_renders_family_update_button_and_click_handler():
     assert 'id="update-family-memory"' in MAIN_JS
     assert "updateFamilyMemory(current)" in MAIN_JS
+
+
+def test_directory_search_restores_focus_and_selection_after_render():
+    search_handler = MAIN_JS.split("document.querySelector('#search').addEventListener('input'", 1)[1].split("document.querySelector('#filter')", 1)[0]
+    assert "selectionStart" in search_handler
+    assert "search?.focus({ preventScroll: true })" in search_handler
+    assert "search.setSelectionRange(selectionStart, selectionEnd)" in search_handler
+
+
+def test_directory_rows_keep_readable_intrinsic_height():
+    assert ".people-list{grid-auto-rows:max-content;align-content:start" in STYLES_CSS
+    assert ".person{min-height:4rem" in STYLES_CSS

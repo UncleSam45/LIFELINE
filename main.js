@@ -1779,7 +1779,20 @@ function bindDirectoryEvents() {
     state.rawgError = '';
     render();
   });
-  document.querySelector('#search').addEventListener('input', (e) => { state.search = e.target.value; render(); });
+  document.querySelector('#search').addEventListener('input', (event) => {
+    const selectionStart = event.target.selectionStart;
+    const selectionEnd = event.target.selectionEnd;
+    state.search = event.target.value;
+    render();
+
+    // Rendering replaces the sidebar markup. Restore the search control's
+    // editing state so filtering does not interrupt multi-character typing.
+    const search = document.querySelector('#search');
+    search?.focus({ preventScroll: true });
+    if (search && selectionStart !== null && selectionEnd !== null) {
+      search.setSelectionRange(selectionStart, selectionEnd);
+    }
+  });
   document.querySelector('#filter').addEventListener('change', (e) => { state.filter = e.target.value; render(); });
   document.querySelectorAll('.person').forEach((button) => button.addEventListener('click', () => { if (state.directoryKindroidSync.busy) return; state.selectedUid = button.dataset.uid; state.activeView = 'directory'; state.activeEntryTab = 'profile'; render(); }));
   document.querySelector('#add').addEventListener('click', () => {
