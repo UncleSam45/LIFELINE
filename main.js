@@ -732,6 +732,68 @@ function renderGenerationsSection(entry) {
   return `<section id="generations-section" class="generations-card tab-panel ${state.activeEntryTab === 'family' ? 'active' : ''}"><div><p class="eyebrow">FAMILY MAP</p><h3>Relationships & household</h3><p class="sync-note">Build ancestry and descendant links with clean cards saved in config.json as generations_people.</p></div>${generationTreeMarkup({ ...person, parents, children })}<div class="generation-summary"><div><b>${parents.length}</b><span>Parents</span></div><div><b>${children.length}</b><span>Children</span></div></div><form id="generation-form" class="field-grid generation-form"><label><span>SEX</span><input data-generation-field="sex" value="${escapeHtml(person.sex || '')}" /></label><label class="wide"><span>NOTES</span><textarea data-generation-field="notes">${escapeHtml(person.notes || '')}</textarea></label></form><div class="relations-grid"><section class="relation-card"><div class="relation-card-head"><span>↑</span><div><h4>Parents & ancestry</h4><p>Choose people who sit above this profile.</p></div></div><ul class="relation-pills">${relationList(parents)}</ul><div id="generation-parents" class="relation-picker">${generationOptions(parents, person.id)}</div></section><section class="relation-card"><div class="relation-card-head"><span>↓</span><div><h4>Children & descendants</h4><p>Choose people directly below this profile.</p></div></div><ul class="relation-pills">${relationList(children)}</ul><div id="generation-children" class="relation-picker">${generationOptions(children, person.id)}</div></section></div></section>`;
 }
 
+function familyMemoryForEntry(entry) {
+  const focus = findGenerationPersonForEntry(entry);
+  if (!focus || !String(focus.id || '').trim()) return { text: '', reason: 'No GENERATIONS profile is linked to this Directory person.' };
+  const focusId = String(focus.id).trim();
+  const people = generationPeople();
+  const byId = generationById();
+  const children = people.filter((person) => {
+    const childId = String(person.id || '').trim();
+    return childId && childId !== focusId && (
+      cleanGenerationIds(focus.children, focusId).includes(childId)
+      || cleanGenerationIds(person.parents, childId).includes(focusId)
+    );
+  });
+  const childrenByPartner = new Map();
+  children.forEach((child) => {
+    const childId = String(child.id).trim();
+    const linkedParentIds = cleanGenerationIds(child.parents, childId).filter((id) => id !== focusId);
+    const sharedChildIds = people.filter((candidate) => {
+      const candidateId = String(candidate.id || '').trim();
+      return candidateId && candidateId !== focusId && candidateId !== childId
+        && cleanGenerationIds(candidate.children, candidateId).includes(childId);
+    }).map((candidate) => String(candidate.id).trim());
+    [...new Set([...linkedParentIds, ...sharedChildIds])].forEach((partnerId) => {
+      if (!byId.has(partnerId)) return;
+      const partnerChildren = childrenByPartner.get(partnerId) || [];
+      if (!partnerChildren.some((person) => String(person.id).trim() === childId)) partnerChildren.push(child);
+      childrenByPartner.set(partnerId, partnerChildren);
+    });
+  });
+  if (!children.length) return { text: '', reason: 'No children are linked to this person in GENERATIONS.' };
+  if (!childrenByPartner.size) return { text: '', reason: 'The linked children do not have another parent or shared-child partner established in GENERATIONS.' };
+  const sex = String(focus.sex || entry?.gender || '').trim().toLowerCase();
+  const feminine = /female|woman|girl|mother|she|her/.test(sex);
+  const masculine = /male|man|boy|father|he|his/.test(sex);
+  const pronoun = feminine ? 'her' : masculine ? 'his' : 'their';
+  const partnerRole = feminine ? "the children's father" : masculine ? "the children's mother" : "the children's other parent";
+  const name = String(focus.name || entry?.name || 'This person').trim();
+  const sentences = [...childrenByPartner.entries()]
+    .sort(([left], [right]) => String(byId.get(left)?.name || '').localeCompare(String(byId.get(right)?.name || '')))
+    .map(([partnerId, partnerChildren]) => {
+      const partnerName = String(byId.get(partnerId)?.name || 'Unknown partner').trim();
+      const childNames = partnerChildren.map((child) => String(child.name || 'Unnamed child').trim());
+      const childWord = childNames.length === 1 ? 'child' : 'children';
+      const names = childNames.length === 1 ? childNames[0] : `${childNames.slice(0, -1).join(', ')} and ${childNames.at(-1)}`;
+      return `${name}, through ${pronoun} life, had ${childNames.length} ${childWord} with ${pronoun} partner ${partnerName}, ${partnerRole}. ${childNames.length === 1 ? 'The child is' : 'The children are'} named ${names}.`;
+    });
+  return { text: sentences.join('\n'), reason: '' };
+}
+
+async function updateFamilyMemory(entry) {
+  flushDirectoryEditorToEntry(entry);
+  const generated = familyMemoryForEntry(entry);
+  if (!generated.text) {
+    alert(`Memory was not updated. ${generated.reason}`);
+    return;
+  }
+  entry.ai_memory = generated.text;
+  const memoryField = document.querySelector('[data-field="ai_memory"]');
+  if (memoryField) memoryField.value = generated.text;
+  await saveBridge('Update family memory from GENERATIONS');
+}
+
 function bridgeUrl(path = BRIDGE_PATH, includeRef = true) {
   const encodedPath = encodeURIComponent(path).replaceAll('%2F', '/');
   const refQuery = includeRef ? `?ref=${BRIDGE_BRANCH}` : '';
@@ -1354,7 +1416,7 @@ function renderDirectory() {
 function fieldMarkup(entry, key, label, kind) {
   const value = entry[key] ?? '';
   if (kind === 'age_combo') return `<label><span>${label} *</span><select data-field="${key}">${AGE_OPTIONS.map((age) => `<option ${age === value ? 'selected' : ''}>${age}</option>`).join('')}</select></label>`;
-  if (kind === 'text') return `<label class="wide"><span>${label} *</span><textarea data-field="${key}">${escapeHtml(value)}</textarea></label>`;
+  if (kind === 'text') return `<label class="wide"><span class="field-label-row"><span>${label} *</span>${key === 'ai_memory' ? '<button id="update-family-memory" class="ghost field-update" type="button" title="Build this memory from GENERATIONS family links">UPDATE</button>' : ''}</span><textarea data-field="${key}">${escapeHtml(value)}</textarea></label>`;
   return `<label><span>${label} *</span><input data-field="${key}" value="${escapeHtml(value)}"/></label>`;
 }
 
@@ -1801,6 +1863,7 @@ function bindDirectoryEvents() {
   document.querySelector('#directory-sync-local')?.addEventListener('click', () => markDirectoryPersonOnlineOnly(state.directoryKindroidSync.personUid));
   document.querySelector('#directory-sync-retry-save')?.addEventListener('click', retryDirectoryFinalBridgeSave);
   document.querySelectorAll('[data-field]').forEach((input) => input.addEventListener('input', (e) => { current[e.target.dataset.field] = e.target.value; }));
+  document.querySelector('#update-family-memory')?.addEventListener('click', () => updateFamilyMemory(current));
   const generation = ensureGenerationPerson(current);
   document.querySelectorAll('[data-generation-field]').forEach((input) => input.addEventListener('input', (e) => {
     generation[e.target.dataset.generationField] = e.target.value;
