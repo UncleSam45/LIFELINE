@@ -50,6 +50,15 @@ def test_directory_sync_has_duplicate_create_lock_and_three_actions():
     assert "markDirectoryPersonOnlineOnly" in MAIN_JS
 
 
+
+def test_successful_kindroid_update_auto_closes_with_notch_animation():
+    assert "autoCloseSuccessfulDirectoryUpdate()" in MAIN_JS
+    assert "sync.result && !sync.error && !sync.retryBridgeSave" in MAIN_JS
+    assert "sync.closing?'is-closing':''" in MAIN_JS
+    assert ".kindroid-sync-backdrop.is-closing" in STYLES_CSS
+    assert "@keyframes syncNotchClose" in STYLES_CSS
+
+
 def test_manual_journal_records_target_ai_id():
     assert "record.remote_ai_id = record.remote_status === 'synced'" in MAIN_JS
     assert "operation:'manual'" in MAIN_JS
