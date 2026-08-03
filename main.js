@@ -159,6 +159,8 @@ const state = {
   bridgeSha: '',
   selectedUid: '',
   activeView: 'world',
+  selectedWikiId: '',
+  wikiSearch: '',
   filter: 'active',
   search: '',
   saving: false,
@@ -287,6 +289,16 @@ function heartbeatEntries() {
   if (!Array.isArray(state.config.heartbeat_entries)) state.config.heartbeat_entries = [];
   state.config.heartbeat_entries = state.config.heartbeat_entries.filter((entry) => entry && typeof entry === 'object');
   return state.config.heartbeat_entries;
+}
+
+function wikiEntries() {
+  if (!Array.isArray(state.config.wiki_entries)) state.config.wiki_entries = [];
+  state.config.wiki_entries = state.config.wiki_entries.filter((entry) => entry && typeof entry === 'object');
+  return state.config.wiki_entries;
+}
+
+function newWikiId() {
+  return `wiki_${Date.now()}_${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
 }
 
 function groupmakerSessions() {
@@ -1409,6 +1421,15 @@ function renderDirectoryWorkspace(current, onlineLabel) {
   return `<div class="hero-line"><div><h1>${escapeHtml(current.name || 'No person selected')}</h1><div class="hero-meta"><span>${escapeHtml(onlineLabel)}</span><span>${escapeHtml(current.location || 'No location')}</span></div></div><button id="save" title="Save locally to the GitHub bridge" ${state.saving ? 'disabled' : ''}>${state.saving ? 'Saving…' : 'Save'}</button></div><div class="entry-tabs" role="tablist"><button class="tab ${state.activeEntryTab === 'profile' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'profile'}" data-tab="profile">PROFILE</button><button class="tab ${state.activeEntryTab === 'family' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'family'}" data-tab="family">FAMILY</button><button class="tab ${state.activeEntryTab === 'memory' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'memory'}" data-tab="memory">MEMORY</button><button class="tab ${state.activeEntryTab === 'journal' ? 'active' : ''}" type="button" role="tab" aria-selected="${state.activeEntryTab === 'journal'}" data-tab="journal">JOURNAL</button></div><div class="tab-stage"><section class="profile-panel tab-panel ${state.activeEntryTab === 'profile' ? 'active' : ''}"><div class="status-grid"><button id="toggle-online" class="status ${current.online ? 'on' : ''}" ${state.directoryKindroidSync.busy ? 'disabled' : ''}><span>${current.online ? 'ONLINE' : 'OFFLINE'}</span><small>${current.online ? 'Ready for routing' : 'Hidden from live flow'}</small></button><div class="asset-card accent"><b>${escapeHtml(current.location || '—')}</b><span>LOCATION</span></div><div class="asset-card accent"><b>${escapeHtml(current.activity || '—')}</b><span>ACTIVITY / CURRENT SCENE</span></div></div><form id="entry-form" class="field-grid">${DIRECTORY_FIELDS.map(([key, label, kind]) => fieldMarkup(current, key, label, kind)).join('')}</form></section>${renderGenerationsSection(current)}${renderMemorySection(current)}${renderJournalSection(current)}</div>`;
 }
 
+function renderWikiView() {
+  const query = state.wikiSearch.trim().toLowerCase();
+  const all = wikiEntries().sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  const visible = all.filter((entry) => !query || `${entry.word || ''} ${entry.content || ''}`.toLowerCase().includes(query));
+  if (!state.selectedWikiId && all[0]) state.selectedWikiId = all[0].id;
+  const current = all.find((entry) => entry.id === state.selectedWikiId);
+  return `<section class="wiki-shell"><header class="wiki-hero"><div><p class="eyebrow">LIFELINE KNOWLEDGE SYSTEM</p><h1>WIKI<span>.</span></h1><p>Your private atlas of names, ideas, places, and everything worth remembering.</p></div><div class="wiki-orbit" aria-hidden="true"><i>W</i><span></span><b></b></div></header><div class="wiki-toolbar"><label><span>⌕</span><input id="wiki-search" value="${escapeHtml(state.wikiSearch)}" placeholder="Search the knowledge base…" aria-label="Search wiki"></label><button id="wiki-new" type="button"><span>＋</span> NEW ENTRY</button></div><div class="wiki-layout"><aside class="wiki-index"><div class="wiki-index-head"><div><span>INDEX</span><b>${all.length} ${all.length === 1 ? 'ENTRY' : 'ENTRIES'}</b></div><small>Recently edited</small></div><div class="wiki-list">${visible.map((entry) => `<button class="wiki-item ${entry.id === state.selectedWikiId ? 'selected' : ''}" data-wiki-id="${escapeHtml(entry.id)}"><span>${escapeHtml((entry.word || '?').slice(0, 1).toUpperCase())}</span><div><b>${escapeHtml(entry.word || 'Untitled')}</b><small>${escapeHtml((entry.content || 'No content yet').replace(/\s+/g, ' ').slice(0, 75))}</small></div><i>›</i></button>`).join('') || '<div class="wiki-empty">No matching knowledge yet.<br>Create the first entry.</div>'}</div></aside><article class="wiki-editor">${current ? `<div class="wiki-editor-meta"><span>KNOWLEDGE ENTRY</span><small>Updated ${escapeHtml(current.updated_at ? new Date(current.updated_at).toLocaleDateString() : 'just now')}</small></div><label class="wiki-word"><span>ENTRY WORD</span><input id="wiki-word" value="${escapeHtml(current.word || '')}" placeholder="What are we defining?"></label><label class="wiki-content"><span>ARTICLE CONTENT</span><textarea id="wiki-content" placeholder="Write everything you want to preserve about this entry…">${escapeHtml(current.content || '')}</textarea></label><footer><button id="wiki-delete" class="ghost danger" type="button">DELETE ENTRY</button><div><span>Stored in your LIFELINE bridge</span><button id="wiki-save" type="button">SAVE TO WIKI <b>↗</b></button></div></footer>` : `<div class="wiki-welcome"><div>W</div><p class="eyebrow">A BEAUTIFUL PLACE FOR IDEAS</p><h2>Build your living<br>knowledge base.</h2><p>Create an entry with a word, then give it all the context it deserves.</p><button id="wiki-new-empty" type="button">CREATE FIRST ENTRY</button></div>`}</article></div></section>`;
+}
+
 function renderDirectoryKindroidSyncModal() {
   const sync=state.directoryKindroidSync; if(!sync.open) return ''; const person=directoryPersonByUid(sync.personUid); const disabled=sync.busy?'disabled':'';
   const progress=sync.completedSteps.map((step)=>`<li class="done">✓ ${escapeHtml(step)}</li>`).join('');
@@ -1424,8 +1445,8 @@ function renderDirectory() {
   if (!state.selectedUid && list[0]) state.selectedUid = list[0].directory_uid;
   const current = selectedEntry();
   const onlineLabel = current?.online ? 'Available now' : 'Standing by';
-  const editorContent = state.activeView === 'world' ? renderHeartbeatView() : renderDirectoryWorkspace(current, onlineLabel);
-  root.innerHTML = `<main class="app-shell"><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="world-view" class="ghost ${state.activeView === 'world' ? 'active' : ''}" type="button">Heartbeat</button><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button><button id="kindroid-panel-toggle" class="kindroid-panel-button ${state.kindroidPanelOpen ? 'active' : ''}" title="Open the Kindroid website in a floating desktop panel"><span>K</span><b>${state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID'}</b><small>kindroid.ai</small></button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}${renderDirectoryKindroidSyncModal()}</main>`;
+  const editorContent = state.activeView === 'world' ? renderHeartbeatView() : state.activeView === 'wiki' ? renderWikiView() : renderDirectoryWorkspace(current, onlineLabel);
+  root.innerHTML = `<main class="app-shell"><button id="world-view" class="heartbeat-launch ${state.activeView === 'world' ? 'active' : ''}" type="button" aria-label="Open Heartbeat" title="Heartbeat"><img src="https://blogs.bcm.edu/wp-content/uploads/2019/08/heart-ekg-image-iStock.png" alt=""></button><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button><button id="wiki-view" class="ghost ${state.activeView === 'wiki' ? 'active' : ''}" type="button">Wiki</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button><button id="kindroid-panel-toggle" class="kindroid-panel-button ${state.kindroidPanelOpen ? 'active' : ''}" title="Open the Kindroid website in a floating desktop panel"><span>K</span><b>${state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID'}</b><small>kindroid.ai</small></button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}${renderDirectoryKindroidSyncModal()}</main>`;
   bindDirectoryEvents();
 }
 
@@ -1758,6 +1779,24 @@ function bindDirectoryEvents() {
   document.querySelector('#filter').value = state.filter;
   document.querySelector('#world-view')?.addEventListener('click', () => { state.activeView = 'world'; render(); });
   document.querySelector('#directory-view')?.addEventListener('click', () => { state.activeView = 'directory'; render(); });
+  document.querySelector('#wiki-view')?.addEventListener('click', () => { state.activeView = 'wiki'; render(); });
+  const createWikiEntry = () => {
+    const entry = { id: newWikiId(), word: 'Untitled', content: '', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    wikiEntries().unshift(entry); state.selectedWikiId = entry.id; state.wikiSearch = ''; render();
+    requestAnimationFrame(() => { const input = document.querySelector('#wiki-word'); input?.focus(); input?.select(); });
+  };
+  document.querySelector('#wiki-new')?.addEventListener('click', createWikiEntry);
+  document.querySelector('#wiki-new-empty')?.addEventListener('click', createWikiEntry);
+  document.querySelectorAll('[data-wiki-id]').forEach((button) => button.addEventListener('click', () => { state.selectedWikiId = button.dataset.wikiId; render(); }));
+  document.querySelector('#wiki-search')?.addEventListener('input', (event) => { state.wikiSearch = event.target.value; render(); requestAnimationFrame(() => { const input = document.querySelector('#wiki-search'); input?.focus(); input?.setSelectionRange(state.wikiSearch.length, state.wikiSearch.length); }); });
+  document.querySelector('#wiki-save')?.addEventListener('click', () => {
+    const entry = wikiEntries().find((item) => item.id === state.selectedWikiId); if (!entry) return;
+    entry.word = document.querySelector('#wiki-word')?.value.trim() || 'Untitled'; entry.content = document.querySelector('#wiki-content')?.value || ''; entry.updated_at = new Date().toISOString(); saveBridge(`Update wiki entry: ${entry.word}`);
+  });
+  document.querySelector('#wiki-delete')?.addEventListener('click', () => {
+    const entry = wikiEntries().find((item) => item.id === state.selectedWikiId); if (!entry || !confirm(`Delete “${entry.word || 'Untitled'}” from the wiki?`)) return;
+    state.config.wiki_entries = wikiEntries().filter((item) => item.id !== entry.id); state.selectedWikiId = state.config.wiki_entries[0]?.id || ''; saveBridge('Delete wiki entry');
+  });
   document.querySelector('#weather-automation')?.addEventListener('click', () => { state.weatherOpen = true; render(); });
   document.querySelector('#weather-back')?.addEventListener('click', () => { state.weatherOpen = false; state.weatherError = ''; render(); });
   document.querySelector('#weather-fetch')?.addEventListener('click', fetchMontrealWeather);
