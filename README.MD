@@ -10,6 +10,7 @@ LIFELINE is a desktop prototype for organizing Kindroid-related directory data, 
 - **Memory Manager:** processes transcript bridge data and stores local memory records.
 - **Ollama integration:** supplies local model inference for memory workflows.
 - **Userscripts:** optional Kindroid transcript, call, journal, and site helpers.
+- **Journal-powered wiki:** journal entries synchronized by `KINDROIDXL.js` to `LIFELINE_BRIDGE/journal.json` are automatically mirrored into the local wiki when the bridge loads; the Wiki view also provides a manual sync action.
 
 These components are prototypes and should be expected to change.
 
