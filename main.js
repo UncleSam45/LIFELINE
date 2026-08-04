@@ -68,6 +68,7 @@ const GITHUB_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const BRIDGE_PATH = 'config.json';
+const JOURNAL_BRIDGE_PATH = 'journal.json';
 const LEGACY_BRIDGE_PATHS = ['config.backup.json', 'kindroidxl_directory/config.json', 'kindroidxl_directory/config.backup.json', 'backups/config.json', 'backups/config.backup.json'];
 const TOKEN_STORAGE_KEY = 'lifeline.bridge.accessKey';
 const REMEMBER_STORAGE_KEY = 'lifeline.bridge.rememberAccessKey';
@@ -159,6 +160,7 @@ const state = {
   activeView: 'world',
   selectedWikiId: '',
   wikiSearch: '',
+  journalWikiSync: { busy: false, status: 'Waiting for bridge', imported: 0, total: 0 },
   filter: 'active',
   search: '',
   saving: false,
@@ -297,6 +299,38 @@ function wikiEntries() {
 
 function newWikiId() {
   return `wiki_${Date.now()}_${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+function normalizeBridgeJournal(payload) {
+  const rows = Array.isArray(payload?.entries) ? payload.entries : [];
+  return rows.map((entry) => ({
+    id: String(entry?.id || '').trim(),
+    word: String(entry?.fullTitle || '').trim(),
+    content: String(entry?.mainEntry || '').trim(),
+    keywords: (Array.isArray(entry?.keywords) ? entry.keywords : []).map((keyword) => String(keyword || '').trim()).filter(Boolean),
+  })).filter((entry) => entry.id && entry.word && entry.content);
+}
+
+function mergeJournalIntoWiki(payload) {
+  const journal = normalizeBridgeJournal(payload);
+  const wiki = wikiEntries();
+  const existing = new Map(wiki.filter((entry) => entry.source_type === 'kindroid_journal' && entry.source_id).map((entry) => [String(entry.source_id), entry]));
+  const sourceUpdatedAt = String(payload?.timestamp || new Date().toISOString());
+  let changed = 0;
+  journal.forEach((source) => {
+    const entry = existing.get(source.id);
+    if (!entry) {
+      wiki.push({ id: `wiki_journal_${source.id}`, word: source.word, content: source.content, created_at: sourceUpdatedAt, updated_at: sourceUpdatedAt, source_type: 'kindroid_journal', source_id: source.id, source_path: JOURNAL_BRIDGE_PATH, keywords: source.keywords });
+      changed += 1;
+      return;
+    }
+    const update = { word: source.word, content: source.content, source_path: JOURNAL_BRIDGE_PATH, keywords: source.keywords };
+    if (Object.entries(update).some(([key, value]) => JSON.stringify(entry[key]) !== JSON.stringify(value))) {
+      Object.assign(entry, update, { updated_at: sourceUpdatedAt });
+      changed += 1;
+    }
+  });
+  return { changed, total: journal.length };
 }
 
 function groupmakerSessions() {
@@ -876,6 +910,29 @@ async function readGithubContentFile(path) {
   return { sha: file.sha || '', config: normalizeImported(decodeBase64(content)) };
 }
 
+async function readGithubJsonFile(path) {
+  const file = await githubRequest(bridgeUrl(path));
+  let content = typeof file.content === 'string' ? file.content : '';
+  if (!content.trim() && file.git_url) content = String((await githubRequest(file.git_url)).content || '');
+  if (!content.trim()) throw new Error(`GitHub returned no readable content for ${path}.`);
+  return decodeBase64(content);
+}
+
+async function syncJournalWiki({ save = true } = {}) {
+  if (state.journalWikiSync.busy) return;
+  state.journalWikiSync = { ...state.journalWikiSync, busy: true, status: `Reading ${JOURNAL_BRIDGE_PATH}…` };
+  if (state.authenticated) render();
+  try {
+    const result = mergeJournalIntoWiki(await readGithubJsonFile(JOURNAL_BRIDGE_PATH));
+    state.journalWikiSync = { busy: false, status: result.changed ? `Imported ${result.changed} journal ${result.changed === 1 ? 'entry' : 'entries'}` : 'Journal wiki is up to date', imported: result.changed, total: result.total };
+    if (result.changed && save) await saveBridge('Auto-populate wiki from Kindroid journal', true);
+  } catch (error) {
+    if (Number(error?.status) === 404) state.journalWikiSync = { busy: false, status: 'No journal.json found yet', imported: 0, total: 0 };
+    else state.journalWikiSync = { ...state.journalWikiSync, busy: false, status: `Journal sync failed: ${error.message}` };
+  }
+  if (state.authenticated) render();
+}
+
 function isGithubShaMismatch(error) {
   const message = String(error?.message || '');
   return Number(error?.status) === 409
@@ -980,6 +1037,7 @@ async function loadBridge() {
       ? `Restored ${entries().length} directory entries from ${BRIDGE_REPO}/${BRIDGE_PATH}.`
       : `Recovered ${entries().length} entries from bridge backup path ${bestCandidate.path}; next save will migrate them to ${BRIDGE_PATH}.`;
     if (dailyRollover) await saveBridgeQuiet('Close expired daily GROUPMAKER sessions');
+    await syncJournalWiki();
   } else if (lastError && !/not found/i.test(lastError.message)) {
     state.authenticated = false;
     state.syncState = 'Denied'; state.syncDetail = lastError.message;
@@ -1422,7 +1480,7 @@ function renderWikiView() {
   const visible = all.filter((entry) => !query || `${entry.word || ''} ${entry.content || ''}`.toLowerCase().includes(query));
   if (!state.selectedWikiId && all[0]) state.selectedWikiId = all[0].id;
   const current = all.find((entry) => entry.id === state.selectedWikiId);
-  return `<section class="wiki-shell"><header class="wiki-hero"><div><p class="eyebrow">LIFELINE KNOWLEDGE SYSTEM</p><h1>WIKI<span>.</span></h1><p>Your private atlas of names, ideas, places, and everything worth remembering.</p></div><div class="wiki-orbit" aria-hidden="true"><i>W</i><span></span><b></b></div></header><div class="wiki-toolbar"><label><span>⌕</span><input id="wiki-search" value="${escapeHtml(state.wikiSearch)}" placeholder="Search the knowledge base…" aria-label="Search wiki"></label><button id="wiki-new" type="button"><span>＋</span> NEW ENTRY</button></div><div class="wiki-layout"><aside class="wiki-index"><div class="wiki-index-head"><div><span>INDEX</span><b>${all.length} ${all.length === 1 ? 'ENTRY' : 'ENTRIES'}</b></div><small>Recently edited</small></div><div class="wiki-list">${visible.map((entry) => `<button class="wiki-item ${entry.id === state.selectedWikiId ? 'selected' : ''}" data-wiki-id="${escapeHtml(entry.id)}"><span>${escapeHtml((entry.word || '?').slice(0, 1).toUpperCase())}</span><div><b>${escapeHtml(entry.word || 'Untitled')}</b><small>${escapeHtml((entry.content || 'No content yet').replace(/\s+/g, ' ').slice(0, 75))}</small></div><i>›</i></button>`).join('') || '<div class="wiki-empty">No matching knowledge yet.<br>Create the first entry.</div>'}</div></aside><article class="wiki-editor">${current ? `<div class="wiki-editor-meta"><span>KNOWLEDGE ENTRY</span><small>Updated ${escapeHtml(current.updated_at ? new Date(current.updated_at).toLocaleDateString() : 'just now')}</small></div><label class="wiki-word"><span>ENTRY WORD</span><input id="wiki-word" value="${escapeHtml(current.word || '')}" placeholder="What are we defining?"></label><label class="wiki-content"><span>ARTICLE CONTENT</span><textarea id="wiki-content" placeholder="Write everything you want to preserve about this entry…">${escapeHtml(current.content || '')}</textarea></label><footer><button id="wiki-delete" class="ghost danger" type="button">DELETE ENTRY</button><div><span>Stored in your LIFELINE bridge</span><button id="wiki-save" type="button">SAVE TO WIKI <b>↗</b></button></div></footer>` : `<div class="wiki-welcome"><div>W</div><p class="eyebrow">A BEAUTIFUL PLACE FOR IDEAS</p><h2>Build your living<br>knowledge base.</h2><p>Create an entry with a word, then give it all the context it deserves.</p><button id="wiki-new-empty" type="button">CREATE FIRST ENTRY</button></div>`}</article></div></section>`;
+  return `<section class="wiki-shell"><header class="wiki-hero"><div><p class="eyebrow">LIFELINE KNOWLEDGE SYSTEM</p><h1>WIKI<span>.</span></h1><p>Your private atlas of names, ideas, places, and everything worth remembering.</p></div><div class="wiki-orbit" aria-hidden="true"><i>W</i><span></span><b></b></div></header><div class="wiki-toolbar"><label><span>⌕</span><input id="wiki-search" value="${escapeHtml(state.wikiSearch)}" placeholder="Search the knowledge base…" aria-label="Search wiki"></label><button id="wiki-journal-sync" class="ghost" type="button" ${state.journalWikiSync.busy ? 'disabled' : ''} title="Import journal.json from LIFELINE_BRIDGE"><span>↻</span> ${state.journalWikiSync.busy ? 'SYNCING…' : 'SYNC JOURNAL'}</button><button id="wiki-new" type="button"><span>＋</span> NEW ENTRY</button></div><p class="wiki-sync-status">${escapeHtml(state.journalWikiSync.status)} · ${state.journalWikiSync.total} bridge journal ${state.journalWikiSync.total === 1 ? 'entry' : 'entries'}</p><div class="wiki-layout"><aside class="wiki-index"><div class="wiki-index-head"><div><span>INDEX</span><b>${all.length} ${all.length === 1 ? 'ENTRY' : 'ENTRIES'}</b></div><small>Recently edited</small></div><div class="wiki-list">${visible.map((entry) => `<button class="wiki-item ${entry.id === state.selectedWikiId ? 'selected' : ''}" data-wiki-id="${escapeHtml(entry.id)}"><span>${escapeHtml((entry.word || '?').slice(0, 1).toUpperCase())}</span><div><b>${escapeHtml(entry.word || 'Untitled')}</b><small>${escapeHtml((entry.content || 'No content yet').replace(/\s+/g, ' ').slice(0, 75))}</small></div><i>›</i></button>`).join('') || '<div class="wiki-empty">No matching knowledge yet.<br>Create the first entry.</div>'}</div></aside><article class="wiki-editor">${current ? `<div class="wiki-editor-meta"><span>KNOWLEDGE ENTRY</span><small>Updated ${escapeHtml(current.updated_at ? new Date(current.updated_at).toLocaleDateString() : 'just now')}</small></div><label class="wiki-word"><span>ENTRY WORD</span><input id="wiki-word" value="${escapeHtml(current.word || '')}" placeholder="What are we defining?"></label><label class="wiki-content"><span>ARTICLE CONTENT</span><textarea id="wiki-content" placeholder="Write everything you want to preserve about this entry…">${escapeHtml(current.content || '')}</textarea></label><footer><button id="wiki-delete" class="ghost danger" type="button">DELETE ENTRY</button><div><span>Stored in your LIFELINE bridge</span><button id="wiki-save" type="button">SAVE TO WIKI <b>↗</b></button></div></footer>` : `<div class="wiki-welcome"><div>W</div><p class="eyebrow">A BEAUTIFUL PLACE FOR IDEAS</p><h2>Build your living<br>knowledge base.</h2><p>Create an entry with a word, then give it all the context it deserves.</p><button id="wiki-new-empty" type="button">CREATE FIRST ENTRY</button></div>`}</article></div></section>`;
 }
 
 function renderDirectoryKindroidSyncModal() {
@@ -1780,6 +1838,7 @@ function bindDirectoryEvents() {
     wikiEntries().unshift(entry); state.selectedWikiId = entry.id; state.wikiSearch = ''; render();
     requestAnimationFrame(() => { const input = document.querySelector('#wiki-word'); input?.focus(); input?.select(); });
   };
+  document.querySelector('#wiki-journal-sync')?.addEventListener('click', () => syncJournalWiki());
   document.querySelector('#wiki-new')?.addEventListener('click', createWikiEntry);
   document.querySelector('#wiki-new-empty')?.addEventListener('click', createWikiEntry);
   document.querySelectorAll('[data-wiki-id]').forEach((button) => button.addEventListener('click', () => { state.selectedWikiId = button.dataset.wikiId; render(); }));

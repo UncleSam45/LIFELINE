@@ -88,3 +88,12 @@ def test_directory_search_restores_focus_and_selection_after_render():
 def test_directory_rows_keep_readable_intrinsic_height():
     assert ".people-list{grid-auto-rows:max-content;align-content:start" in STYLES_CSS
     assert ".person{min-height:4rem" in STYLES_CSS
+
+
+def test_bridge_journal_auto_populates_wiki():
+    assert "const JOURNAL_BRIDGE_PATH = 'journal.json'" in MAIN_JS
+    assert "function mergeJournalIntoWiki(payload)" in MAIN_JS
+    assert "source_type: 'kindroid_journal'" in MAIN_JS
+    assert "await syncJournalWiki();" in MAIN_JS
+    assert "saveBridge('Auto-populate wiki from Kindroid journal', true)" in MAIN_JS
+    assert 'id="wiki-journal-sync"' in MAIN_JS
