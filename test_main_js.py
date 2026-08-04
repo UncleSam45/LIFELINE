@@ -88,3 +88,30 @@ def test_directory_search_restores_focus_and_selection_after_render():
 def test_directory_rows_keep_readable_intrinsic_height():
     assert ".people-list{grid-auto-rows:max-content;align-content:start" in STYLES_CSS
     assert ".person{min-height:4rem" in STYLES_CSS
+
+
+def test_bridge_journal_auto_populates_wiki():
+    assert "const JOURNAL_BRIDGE_PATH = 'journal.json'" in MAIN_JS
+    assert "function mergeJournalIntoWiki(payload)" in MAIN_JS
+    assert "source_type: 'kindroid_journal'" in MAIN_JS
+    assert "await syncJournalWiki();" in MAIN_JS
+    assert "saveBridge('Auto-populate wiki from Kindroid journal', true)" in MAIN_JS
+    assert 'id="wiki-journal-sync"' in MAIN_JS
+
+
+def test_wiki_defaults_to_saved_article_reading_mode():
+    assert "wikiEditing: false" in MAIN_JS
+    assert "Already saved in your LIFELINE wiki" in MAIN_JS
+    assert 'id="wiki-edit"' in MAIN_JS
+    assert 'SAVE CHANGES' in MAIN_JS
+    assert 'SAVE TO WIKI' not in MAIN_JS
+    assert "function wikiArticleMarkup(content)" in MAIN_JS
+    assert ".wiki-prose p:first-child:first-letter" in STYLES_CSS
+
+
+def test_wiki_highlights_only_one_dominant_keyword():
+    assert "const dominantKeyword = articleKeywords[0]" in MAIN_JS
+    assert "const supportingKeywords = articleKeywords.slice(1)" in MAIN_JS
+    assert 'class="wiki-keyword-dominant"' in MAIN_JS
+    assert "supportingKeywords.map(escapeHtml).join(' · ')" in MAIN_JS
+    assert ".wiki-keyword-dominant" in STYLES_CSS
