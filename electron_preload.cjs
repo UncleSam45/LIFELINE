@@ -9,12 +9,4 @@ contextBridge.exposeInMainWorld('lifelineElectron', {
     ipcRenderer.on('lifeline:kindroid-panel-state', listener);
     return () => ipcRenderer.removeListener('lifeline:kindroid-panel-state', listener);
   },
-  journalSync: {
-    scan: (payload) => ipcRenderer.invoke('lifeline:journal-sync-scan', payload),
-    apply: (payload) => ipcRenderer.invoke('lifeline:journal-sync-mutate', payload),
-    cancel: () => ipcRenderer.invoke('lifeline:journal-sync-cancel'),
-    getStatus: () => ipcRenderer.invoke('lifeline:journal-sync-status'),
-    showKindroidWindow: () => ipcRenderer.invoke('lifeline:toggle-kindroid-panel'),
-    onProgress: (callback) => { const listener=(_event,value)=>callback(value);ipcRenderer.on('lifeline:journal-sync-progress',listener);return()=>ipcRenderer.removeListener('lifeline:journal-sync-progress',listener); },
-  },
 });
