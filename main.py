@@ -233,7 +233,13 @@ def _electron_executable() -> Path:
 
 
 def _run_electron(electron: Path) -> None:
-    subprocess.check_call([str(electron), str(ELECTRON_MAIN_PATH)], cwd=APP_ROOT)
+    environment = os.environ.copy()
+    environment["LIFELINE_LAUNCHER_PID"] = str(os.getpid())
+    subprocess.check_call(
+        [str(electron), str(ELECTRON_MAIN_PATH)],
+        cwd=APP_ROOT,
+        env=environment,
+    )
 
 
 def _is_windows_dll_load_failure(error: subprocess.CalledProcessError) -> bool:

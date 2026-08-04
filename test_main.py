@@ -85,3 +85,19 @@ def test_spawn_background_closes_parent_log_stream():
     assert result is mock.sentinel.process
     popen.assert_called_once_with(["service"])
     log.close.assert_called_once_with()
+
+
+def test_run_electron_identifies_launcher_process():
+    electron = Path("/opt/electron")
+    with mock.patch.object(subprocess, "check_call") as check_call, mock.patch.object(
+        main.os, "getpid", return_value=4321
+    ), mock.patch.dict(main.os.environ, {"EXISTING_SETTING": "kept"}, clear=True):
+        main._run_electron(electron)
+
+    check_call.assert_called_once()
+    command = check_call.call_args.args[0]
+    options = check_call.call_args.kwargs
+    assert command == [str(electron), str(main.ELECTRON_MAIN_PATH)]
+    assert options["cwd"] == main.APP_ROOT
+    assert options["env"]["LIFELINE_LAUNCHER_PID"] == "4321"
+    assert options["env"]["EXISTING_SETTING"] == "kept"
