@@ -767,6 +767,28 @@ function ensureGenerationPerson(entry) {
 function syncGenerationPeopleWithDirectory() {
   const directoryEntries = entries().map(ensureEntry);
   const previous = generationPeople();
+  const entryForGenerationPerson = (person) => {
+    const directoryUid = String(person?.directory_uid || '').trim();
+    const aiId = String(person?.directory_ai_id || '').trim();
+    const name = normalizedGenerationName(person?.name);
+    return directoryEntries.find((entry) => directoryUid && String(entry.directory_uid || '').trim() === directoryUid)
+      || directoryEntries.find((entry) => aiId && String(entry.ai_id || '').trim() === aiId)
+      || directoryEntries.find((entry) => name && normalizedGenerationName(entry.name) === name);
+  };
+  const previousById = new Map(previous.map((person) => [String(person.id || '').trim(), person]).filter(([id]) => id));
+  previous.forEach((person) => {
+    const entry = entryForGenerationPerson(person);
+    if (!entry) return;
+    ['parents', 'children'].forEach((relationKey) => {
+      if (Array.isArray(entry.family_relationships?.[relationKey])) return;
+      const relatedUids = [...new Set((Array.isArray(person[relationKey]) ? person[relationKey] : [])
+        .map((id) => entryForGenerationPerson(previousById.get(String(id || '').trim())))
+        .map((relative) => String(relative?.directory_uid || '').trim())
+        .filter((uid) => uid && uid !== String(entry.directory_uid || '').trim()))];
+      if (!relatedUids.length) return;
+      entry.family_relationships = { parents: [], children: [], ...(entry.family_relationships || {}), [relationKey]: relatedUids };
+    });
+  });
   const claimed = new Set();
   const canonical = directoryEntries.map((entry) => {
     const uid = String(entry.directory_uid || '').trim();
@@ -947,7 +969,6 @@ function familyMemoryForEntry(entry) {
     const cleaned = String(value || '').trim().replace(/^[^\p{L}\p{N}]+/u, '').trim();
     return cleaned ? cleaned.split(/\s+/)[0] : fallback;
   };
-  const firstName = conversationalName(name, 'This person');
   if (pregnancy) {
     const rawProgress = typeof pregnancy.progress === 'string' ? pregnancy.progress.trim().replace(/%$/, '') : pregnancy.progress;
     const parsedProgress = Number(rawProgress);
@@ -966,9 +987,9 @@ function familyMemoryForEntry(entry) {
     const progressPhrase = progress === null
       ? ''
       : `, and the pregnancy is about ${Number.isInteger(progress) ? progress : progress.toFixed(1)}% along`;
-    pregnancySentences.push(`${firstName} is currently pregnant${partnerPhrase}${progressPhrase}.`);
+    pregnancySentences.push(`${name} is current pregnant${partnerPhrase}${progressPhrase}.`);
   } else {
-    pregnancySentences.push(`${firstName} is not currently pregnant.`);
+    pregnancySentences.push(`${name} is not current pregnant.`);
   }
   const children = people.filter((person) => {
     const childId = String(person.id || '').trim();
@@ -999,25 +1020,37 @@ function familyMemoryForEntry(entry) {
     if (/male|man|boy|son|he|his/.test(childSex)) return 'son';
     return 'child';
   };
-  const sex = String(focus.sex || entry?.gender || '').trim().toLowerCase();
-  const feminine = /female|woman|girl|mother|she|her/.test(sex);
-  const masculine = /male|man|boy|father|he|his/.test(sex);
-  const pronoun = feminine ? 'her' : masculine ? 'his' : 'their';
-  const partnerRole = feminine ? "the children's father" : masculine ? "the children's mother" : "the children's other parent";
+  const possessiveName = /s$/i.test(name) ? `${name}'` : `${name}'s`;
+  const naturalList = (items) => items.length < 2 ? (items[0] || '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+  const sentence = (value) => /[.!?]$/.test(value) ? value : `${value}.`;
+  const childCountDescription = (partnerChildren) => {
+    const counts = partnerChildren.reduce((result, child) => {
+      const role = childRole(child);
+      result[role] = (result[role] || 0) + 1;
+      return result;
+    }, {});
+    const countRole = (role) => `${counts[role] || 0} ${(counts[role] || 0) === 1 ? role : `${role}s`}`;
+    return `${countRole('daughter')} and ${countRole('son')}`;
+  };
+  const focusSex = String(focus.sex || entry?.gender || '').trim().toLowerCase();
+  const unknownCoparent = /female|woman|girl|mother|she|her/.test(focusSex)
+    ? 'unknown father'
+    : /male|man|boy|father|he|his/.test(focusSex) ? 'unknown mother' : 'unknown co-parent';
   const partneredChildIds = new Set([...childrenByPartner.values()].flat().map((child) => String(child.id || '').trim()));
   const familySentences = [...childrenByPartner.entries()]
     .sort(([left], [right]) => String(byId.get(left)?.name || '').localeCompare(String(byId.get(right)?.name || '')))
     .map(([partnerId, partnerChildren]) => {
       const partnerName = String(byId.get(partnerId)?.name || 'Unknown partner').trim();
       const childNames = partnerChildren.map((child) => String(child.name || 'Unnamed child').trim());
-      const childWord = childNames.length === 1 ? 'child' : 'children';
-      const names = childNames.length === 1 ? childNames[0] : `${childNames.slice(0, -1).join(', ')} and ${childNames.at(-1)}`;
-      return `${name}, through ${pronoun} life, had ${childNames.length} ${childWord} with ${pronoun} partner ${partnerName}, ${partnerRole}. ${childNames.length === 1 ? 'The child is' : 'The children are'} named ${names}.`;
+      const names = naturalList(childNames);
+      return `${sentence(`${name} has ${childCountDescription(partnerChildren)} with ${partnerName}`)} ${sentence(`${possessiveName} children are named ${names}`)}`;
     });
-  children.filter((child) => !partneredChildIds.has(String(child.id || '').trim())).forEach((child) => {
-    familySentences.push(`${firstName} has a ${childRole(child)} named ${String(child.name || 'Unnamed child').trim()}.`);
-  });
-  return { text: [...pregnancySentences, ...familySentences].join('\n'), reason: '' };
+  const childrenWithoutPartner = children.filter((child) => !partneredChildIds.has(String(child.id || '').trim()));
+  if (childrenWithoutPartner.length) {
+    const childNames = childrenWithoutPartner.map((child) => String(child.name || 'Unnamed child').trim());
+    familySentences.push(`${sentence(`${name} has ${childCountDescription(childrenWithoutPartner)} with ${unknownCoparent}`)} ${sentence(`${possessiveName} children are named ${naturalList(childNames)}`)}`);
+  }
+  return { text: [...pregnancySentences, ...familySentences].join(' '), reason: '' };
 }
 
 async function updateFamilyMemory(entry) {
