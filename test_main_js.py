@@ -73,10 +73,12 @@ def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
     assert "syncGenerationPeopleWithDirectory();" in family_memory_body
     assert "cleanGenerationIds(child.parents, childId)" in MAIN_JS
     assert "cleanGenerationIds(candidate.children, candidateId).includes(childId)" in MAIN_JS
-    assert "has a ${childRole(child)} named" in MAIN_JS
+    assert "has ${childCountDescription(partnerChildren)} with ${partnerName}" in MAIN_JS
+    assert "${possessiveName} ${childWord} with ${partnerName}" in MAIN_JS
+    assert "has 1 ${childRole(child)}" in MAIN_JS
     assert "return 'daughter'" in MAIN_JS
     assert "return 'son'" in MAIN_JS
-    assert "The children are" in MAIN_JS
+    assert "const childCountDescription" in MAIN_JS
     assert "partneredChildIds" in MAIN_JS
     assert "saveBridge('Update family memory from GENERATIONS')" in MAIN_JS
 
