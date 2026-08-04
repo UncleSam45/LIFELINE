@@ -1,0 +1,63 @@
+'use strict';
+
+const UI_MAP_ERROR = 'KINDROID JOURNAL UI MAP NEEDS UPDATE';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+class KindroidJournalAdapter {
+  constructor(window) { this.window = window; }
+  async run(source) { if (!this.window || this.window.isDestroyed()) throw new Error('Journal window is unavailable.'); return this.window.webContents.executeJavaScript(`(${source})()`); }
+  async pageIsUsable(expectedPath) { try { const url=new URL(this.window.webContents.getURL());if(!/(^|\.)kindroid\.ai$/i.test(url.hostname)||url.pathname!==expectedPath)return false;return await this.run(`() => document.readyState !== 'loading' && Boolean(document.body)`); } catch (_error) { return false; } }
+  async journalShellIsReady(expectedPath) { if(!await this.pageIsUsable(expectedPath))return false;return this.run(`() => [...document.querySelectorAll('button[role="radio"]')].some(button => /^(Personal|Global)$/i.test(String(button.textContent||'').replace(/\\s+/g,' ').trim()))`); }
+  async openJournalPage(aiId) {
+    const id=String(aiId||'').trim();if(!/^[A-Za-z0-9_-]{6,128}$/.test(id))throw new Error('NO VALID DIRECTORY AI ID');
+    const expectedPath=`/v2/kin-settings/${encodeURIComponent(id)}/`;const target=`https://kindroid.ai${expectedPath}?tab=journal`;
+    // Navigate from inside the already-loaded Kindroid SPA. Calling Electron's
+    // loadURL for an internal SPA route can reject with ERR_FAILED even while
+    // the client router is successfully taking ownership of that route.
+    const assigned=await this.run(`() => { location.assign(${JSON.stringify(target)}); return true; }`).catch(()=>false);
+    if(!assigned)throw new Error('JOURNAL PAGE FAILED TO LOAD');
+    for(let attempt=0;attempt<120;attempt++){await sleep(250);const url=this.window.webContents.getURL();if(/login|signin|auth/i.test(url))throw new Error('LOGIN REQUIRED');if(await this.journalShellIsReady(expectedPath))return;}
+    throw new Error('JOURNAL PAGE FAILED TO LOAD');
+  }
+  async selectJournalScope(scope) { const wanted=scope==='global'?'Global':'Personal';let clicked=false;for(let attempt=0;attempt<40;attempt++){clicked=await this.run(`() => { const norm=s=>String(s||'').replace(/\\s+/g,' ').trim(); const button=[...document.querySelectorAll('button[role="radio"]')].find(x=>norm(x.textContent)===${JSON.stringify(wanted)}); if(!button)return false;if(button.getAttribute('aria-checked')!=='true')button.click();return true; }`);if(clicked)break;await sleep(250);}if(!clicked)throw new Error(scope==='global'?'GLOBAL SCOPE COULD NOT BE SELECTED':UI_MAP_ERROR);for(let attempt=0;attempt<20;attempt++){const selected=await this.run(`() => [...document.querySelectorAll('button[role="radio"]')].some(x=>String(x.textContent||'').replace(/\\s+/g,' ').trim()===${JSON.stringify(wanted)}&&x.getAttribute('aria-checked')==='true')`);if(selected)return;await sleep(200);}throw new Error(scope==='global'?'GLOBAL SCOPE COULD NOT BE SELECTED':UI_MAP_ERROR); }
+  async waitForJournalList() { for(let i=0;i<40;i++){const ok=await this.run(`() => {const n=s=>String(s||'').replace(/\\s+/g,' ').trim();const buttons=[...document.querySelectorAll('button')];const add=buttons.some(b=>/add|new|create/i.test(b.getAttribute('aria-label')||''));const row=buttons.some(b=>b.getAttribute('role')!=='radio'&&!b.getAttribute('aria-label')&&!b.closest('nav,header,[role="dialog"]')&&b.querySelectorAll('p,div,span').length>=2&&n(b.innerText));const empty=/no journal|no entr(?:y|ies)|empty/i.test(document.body.innerText);return add||row||empty;}`);if(ok)return;await sleep(250);}throw new Error('JOURNAL PAGE FAILED TO LOAD'); }
+  async scanJournalIndex() {
+    const rows=await this.run(`async () => {
+      const norm=s=>String(s||'').replace(/\\s+/g,' ').trim();
+      const ignored=/^(global|personal|save changes|delete entry|delete|back|add|new|create)$/i;
+      const scrollables=()=>[document.scrollingElement,...document.querySelectorAll('main,section,div')].filter((x,i,a)=>x&&a.indexOf(x)===i&&x.scrollHeight>x.clientHeight+20);
+      const container=scrollables().sort((a,b)=>(b.scrollHeight-b.clientHeight)-(a.scrollHeight-a.clientHeight))[0]||document.scrollingElement;
+      const found=new Map(); let stable=0,last=-1;
+      while(stable<5){
+        [...document.querySelectorAll('button')].filter(button=>{
+          const text=norm(button.innerText); const label=norm(button.getAttribute('aria-label'));
+          if(!text||ignored.test(text)||label||button.getAttribute('role')==='radio'||button.closest('nav,header,[role="dialog"]'))return false;
+          const blocks=[...button.querySelectorAll('p,div,span')].map(x=>norm(x.innerText)).filter(Boolean);
+          return blocks.length>=2 || (blocks.length===1&&text.length>20);
+        }).forEach(button=>{
+          const raw=String(button.innerText||'').trim(); const text=norm(raw);
+          const lines=raw.split(/\\n+/).map(norm).filter(Boolean);
+          const key=JSON.stringify([lines[0]||text,text]);
+          if(!found.has(key))found.set(key,{title:lines[0]||text,preview:lines.slice(1).join(' '),handle:{visible_text:text,title:lines[0]||text,preview:lines.slice(1).join(' ')}});
+        });
+        if(found.size===last)stable++;else stable=0;last=found.size;
+        const before=container.scrollTop;container.scrollTop=Math.min(container.scrollHeight,container.scrollTop+Math.max(300,container.clientHeight*.8));
+        container.dispatchEvent(new Event('scroll',{bubbles:true}));await new Promise(r=>setTimeout(r,350));
+        if(container.scrollTop===before)stable++;
+      }
+      container.scrollTop=0;container.dispatchEvent(new Event('scroll',{bubbles:true}));return [...found.values()];
+    }`);
+    return rows;
+  }
+  async openJournalEntry(handle) { const text=String(handle?.visible_text||''); const title=String(handle?.title||''); const preview=String(handle?.preview||''); const ok=await this.run(`async () => {const n=s=>String(s||'').replace(/\\s+/g,' ').trim();const visible=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0};const scrollables=[document.scrollingElement,...document.querySelectorAll('main,section,div')].filter((x,i,a)=>x&&a.indexOf(x)===i&&x.scrollHeight>x.clientHeight+20).sort((a,b)=>(b.scrollHeight-b.clientHeight)-(a.scrollHeight-a.clientHeight));const container=scrollables[0]||document.scrollingElement;for(let attempt=0;attempt<80;attempt++){const buttons=[...document.querySelectorAll('button')].filter(visible);const exact=buttons.find(x=>n(x.innerText)===${JSON.stringify(text)});const semantic=buttons.find(x=>n(x.innerText).startsWith(${JSON.stringify(title)})&&(!${JSON.stringify(preview)}||n(x.innerText).includes(${JSON.stringify(preview)})));const button=exact||semantic;if(button){button.scrollIntoView({block:'center'});button.click();return true;}const before=container.scrollTop;container.scrollTop=Math.min(container.scrollHeight,container.scrollTop+Math.max(250,container.clientHeight*.7));container.dispatchEvent(new Event('scroll',{bubbles:true}));await new Promise(r=>setTimeout(r,150));if(container.scrollTop===before)break;}return false;}`);if(!ok)return false;for(let i=0;i<20;i++){if(await this.run(`() => Boolean(document.querySelector('textarea[maxlength="500"]'))`))return true;await sleep(100);}await this.run(`() => {const back=document.querySelector('button[aria-label="Back"]');if(back)back.click();return Boolean(back);}`).catch(()=>false);await sleep(200);return false; }
+  async readJournalEditor() { const data=await this.run(`() => {const textarea=document.querySelector('textarea[maxlength="500"]');if(!textarea)return null;const norm=s=>String(s||'').replace(/\\s+/g,' ').trim();const remove=[...document.querySelectorAll('button[aria-label^="Remove" i]')];const keywords=remove.map(button=>{const parent=button.parentElement;const parentText=norm(parent?.innerText);if(parentText)return parentText;return norm(button.getAttribute('aria-label')).replace(/^Remove(?: keyword)?\\s*/i,'');}).filter(Boolean);const remoteId=[...document.querySelectorAll('[data-id],[data-entry-id],[data-journal-id]')].map(x=>x.getAttribute('data-entry-id')||x.getAttribute('data-journal-id')||x.getAttribute('data-id')).find(Boolean)||'';return {keywords:[...new Set(keywords)],description:textarea.value||'',remote_id:String(remoteId)};}`);if(!data)throw new Error(UI_MAP_ERROR);return data; }
+  async returnToJournalList(){const ok=await this.run(`() => {const b=document.querySelector('button[aria-label="Back"]');if(!b)return false;b.click();return true;}`);if(!ok)throw new Error(UI_MAP_ERROR);await sleep(300);}
+  async scan(scope){await this.selectJournalScope(scope);await this.waitForJournalList();const handles=await this.scanJournalIndex();const entries=[];const skipped=[];for(const handle of handles){try{const opened=await this.openJournalEntry(handle);if(!opened){skipped.push(handle.title);continue;}const value=await this.readJournalEditor();entries.push({...value,title:value.keywords[0]||handle.title,remote_handle:handle});await this.returnToJournalList();}catch(error){skipped.push(handle.title);const inEditor=await this.run(`() => Boolean(document.querySelector('textarea[maxlength="500"]'))`).catch(()=>false);if(inEditor)await this.returnToJournalList().catch(()=>{});}}if(handles.length&&!entries.length)throw new Error(`JOURNAL LIST COULD NOT BE FULLY SCANNED (${handles.length} row candidates found; none opened as journal entries)`);return {scope,entries,skipped_candidates:skipped};}
+  async openNewJournalEditor(){const ok=await this.run(`() => {const buttons=[...document.querySelectorAll('button')];const b=buttons.find(x=>/add|new|create/i.test(x.getAttribute('aria-label')||''))||buttons.find(x=>x.querySelector('svg')&&/plus/i.test(x.innerHTML));if(!b)return false;b.click();return true;}`);if(!ok)throw new Error(UI_MAP_ERROR);await sleep(300);}
+  async replaceJournalKeywords(keywords){if(keywords.length>8||keywords.some(x=>x.length>50))throw new Error('Invalid journal keywords.');await this.run(`async () => {for(const b of document.querySelectorAll('button[aria-label^="Remove"]')){b.click();await new Promise(r=>setTimeout(r,30));}const input=document.querySelector('input[placeholder="Add another"]');if(!input)return false;for(const word of ${JSON.stringify(keywords)}){const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(input,word);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true}));await new Promise(r=>setTimeout(r,80));}return true;}`);}
+  async replaceJournalDescription(description){const ok=await this.run(`() => {const t=document.querySelector('textarea[maxlength="500"]');if(!t)return false;Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,${JSON.stringify(description)});t.dispatchEvent(new Event('input',{bubbles:true}));t.dispatchEvent(new Event('change',{bubbles:true}));return true;}`);if(!ok)throw new Error(UI_MAP_ERROR);}
+  async clickText(text){const ok=await this.run(`() => {const n=s=>String(s||'').replace(/\\s+/g,' ').trim();const b=[...document.querySelectorAll('button')].find(x=>n(x.textContent)===${JSON.stringify(text)});if(!b)return false;b.click();return true;}`);if(!ok)throw new Error(UI_MAP_ERROR);await sleep(450);}
+  async saveJournalEntry(){await this.clickText('Save changes');}
+  async deleteJournalEntry(){await this.clickText('Delete entry');await this.clickText('Delete');}
+}
+module.exports={KindroidJournalAdapter,UI_MAP_ERROR};
