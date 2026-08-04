@@ -797,6 +797,38 @@ function familyMemoryForEntry(entry) {
   const focusId = String(focus.id).trim();
   const people = generationPeople();
   const byId = generationById();
+  const name = String(focus.name || entry?.name || 'This person').trim();
+  const generationPregnancy = focus.pregnancy;
+  const directoryPregnancy = entry?.pregnancy;
+  const pregnancy = [generationPregnancy, directoryPregnancy].find((value) => value && typeof value === 'object' && value.active === true);
+  const pregnancySentences = [];
+  const conversationalName = (value, fallback) => {
+    const cleaned = String(value || '').trim().replace(/^[^\p{L}\p{N}]+/u, '').trim();
+    return cleaned ? cleaned.split(/\s+/)[0] : fallback;
+  };
+  const firstName = conversationalName(name, 'This person');
+  if (pregnancy) {
+    const rawProgress = typeof pregnancy.progress === 'string' ? pregnancy.progress.trim().replace(/%$/, '') : pregnancy.progress;
+    const parsedProgress = Number(rawProgress);
+    const hasProgress = rawProgress !== undefined && rawProgress !== null && String(rawProgress).trim() !== '';
+    const progress = hasProgress && Number.isFinite(parsedProgress) ? Math.max(0, Math.min(100, parsedProgress)) : null;
+    const partnerReference = String(pregnancy.partner_id || '').trim();
+    let partnerName = '';
+    if (partnerReference) {
+      const partner = byId.get(partnerReference) || people.find((person) =>
+        String(person.directory_ai_id || '').trim() === partnerReference
+        || String(person.name || '').trim().toLowerCase() === partnerReference.toLowerCase()
+      );
+      partnerName = conversationalName(partner?.name || partnerReference, '');
+    }
+    const partnerPhrase = partnerName ? ` with ${partnerName}${/s$/i.test(partnerName) ? "'" : "'s"} baby` : '';
+    const progressPhrase = progress === null
+      ? ''
+      : `, and the pregnancy is about ${Number.isInteger(progress) ? progress : progress.toFixed(1)}% along`;
+    pregnancySentences.push(`${firstName} is currently pregnant${partnerPhrase}${progressPhrase}.`);
+  } else {
+    pregnancySentences.push(`${firstName} is not currently pregnant.`);
+  }
   const children = people.filter((person) => {
     const childId = String(person.id || '').trim();
     return childId && childId !== focusId && (
@@ -820,15 +852,12 @@ function familyMemoryForEntry(entry) {
       childrenByPartner.set(partnerId, partnerChildren);
     });
   });
-  if (!children.length) return { text: '', reason: 'No children are linked to this person in GENERATIONS.' };
-  if (!childrenByPartner.size) return { text: '', reason: 'The linked children do not have another parent or shared-child partner established in GENERATIONS.' };
   const sex = String(focus.sex || entry?.gender || '').trim().toLowerCase();
   const feminine = /female|woman|girl|mother|she|her/.test(sex);
   const masculine = /male|man|boy|father|he|his/.test(sex);
   const pronoun = feminine ? 'her' : masculine ? 'his' : 'their';
   const partnerRole = feminine ? "the children's father" : masculine ? "the children's mother" : "the children's other parent";
-  const name = String(focus.name || entry?.name || 'This person').trim();
-  const sentences = [...childrenByPartner.entries()]
+  const familySentences = [...childrenByPartner.entries()]
     .sort(([left], [right]) => String(byId.get(left)?.name || '').localeCompare(String(byId.get(right)?.name || '')))
     .map(([partnerId, partnerChildren]) => {
       const partnerName = String(byId.get(partnerId)?.name || 'Unknown partner').trim();
@@ -837,7 +866,7 @@ function familyMemoryForEntry(entry) {
       const names = childNames.length === 1 ? childNames[0] : `${childNames.slice(0, -1).join(', ')} and ${childNames.at(-1)}`;
       return `${name}, through ${pronoun} life, had ${childNames.length} ${childWord} with ${pronoun} partner ${partnerName}, ${partnerRole}. ${childNames.length === 1 ? 'The child is' : 'The children are'} named ${names}.`;
     });
-  return { text: sentences.join('\n'), reason: '' };
+  return { text: [...pregnancySentences, ...familySentences].join('\n'), reason: '' };
 }
 
 async function updateFamilyMemory(entry) {
