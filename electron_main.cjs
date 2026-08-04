@@ -8,6 +8,7 @@ const transcriptWindows = new Map();
 const transcriptCaptureTimers = new Map();
 let mainWindow = null;
 let kindroidPanel = null;
+let journalWindow = null;
 let activeJournalSync = null;
 let tray = null;
 let allowQuit = false;
@@ -61,11 +62,13 @@ function createMainWindow() {
     event.preventDefault();
     win.hide();
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+    if (journalWindow && !journalWindow.isDestroyed()) journalWindow.hide();
     showTrayNotice();
   });
   win.on('closed', () => {
     mainWindow = null;
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.close();
+    if (journalWindow && !journalWindow.isDestroyed()) journalWindow.close();
   });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
@@ -88,6 +91,7 @@ function createTray() {
     { label: 'Minimize to Tray', click: () => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
       if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+      if (journalWindow && !journalWindow.isDestroyed()) journalWindow.hide();
     } },
     { type: 'separator' },
     { label: 'Quit', click: quitApplication },
@@ -155,10 +159,27 @@ function createKindroidPanel() {
 
 async function loadKindroidPanel(panel) {
   await prepareKindroidSession();
-  const kindroidSession = panel.webContents.session;
-  await kindroidSession.clearCache();
-  await kindroidSession.clearStorageData({ origin: KINDROID_HOME_URL, storages: ['serviceworkers', 'cachestorage'] });
-  await panel.loadURL(KINDROID_HOME_URL, { extraHeaders: 'Cache-Control: no-cache, no-store\nPragma: no-cache' });
+  // Kindroid is a service-worker-backed SPA. Clearing its cache/service worker
+  // whenever the panel is shown can leave every route blank until Electron is
+  // restarted. Preserve the persistent partition and the user's current route;
+  // always restore the general panel to a known-good route when the user opens
+  // it. Journal automation runs in its own window and must never strand this
+  // shared browsing panel on an editor or failed settings route.
+  await panel.loadURL(KINDROID_HOME_URL);
+}
+
+function createJournalWindow() {
+  if (journalWindow && !journalWindow.isDestroyed()) return journalWindow;
+  const ownerBounds = mainWindow?.getBounds() || { x:100, y:100, width:1500, height:940 };
+  journalWindow = new BrowserWindow({
+    width:520, height:Math.min(840, ownerBounds.height),
+    x:ownerBounds.x + ownerBounds.width - 540, y:ownerBounds.y + 50,
+    minWidth:420, minHeight:560, title:'Kindroid Journals · LIFELINE',
+    parent:mainWindow || undefined, show:false, autoHideMenuBar:true,
+    webPreferences:kindroidWebPreferences(),
+  });
+  journalWindow.on('closed', () => { journalWindow = null; });
+  return journalWindow;
 }
 
 function cleanGroupId(value) {
@@ -573,28 +594,75 @@ ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
 ipcMain.handle('lifeline:get-kindroid-panel-state', () => kindroidPanelState());
 
 function journalProgress(stage, detail = '') {
+  console.log(`[Journal Sync] ${stage}${detail ? `: ${detail}` : ''}`);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('lifeline:journal-sync-progress', { stage, detail });
 }
+
+function journalTimeout(promise, milliseconds, stage) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => { timer = setTimeout(() => { const error = new Error(`Timed out after ${Math.round(milliseconds / 1000)} seconds.`); error.stage = stage; reject(error); }, milliseconds); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+// Opening is deliberately a separate IPC round trip. This makes the first
+// user-visible action independent from the longer DOM scan and proves that the
+// renderer/preload/main bridge is alive before extraction begins.
+ipcMain.handle('lifeline:journal-sync-open', async (_event, payload = {}) => {
+  let panel;
+  try {
+    journalProgress('opening', 'Opening Kindroid journal…');
+    panel = createJournalWindow();
+    panel.show();
+    panel.focus();
+    const adapter = new KindroidJournalAdapter(panel, { progress: journalProgress });
+    await prepareKindroidSession();
+    await journalTimeout(adapter.openJournalPage(payload.aiId), 30000, 'opening-journal-route');
+    journalProgress('journal_page_ready', panel.webContents.getURL());
+    return { ok:true, stage:'journal-page-ready', url:panel.webContents.getURL() };
+  } catch (error) {
+    let diagnostics = { url:panel && !panel.isDestroyed() ? panel.webContents.getURL() : '' };
+    try { if (panel && !panel.isDestroyed()) diagnostics = await new KindroidJournalAdapter(panel).diagnostics(); } catch (_) {}
+    console.error(`[Journal Sync] Open failure at ${error.stage || 'opening-journal-route'}: ${error.message}\n${error.stack || ''}`);
+    return { ok:false, stage:error.stage || 'opening-journal-route', error:error.message, message:error.message, diagnostics };
+  }
+});
 
 ipcMain.handle('lifeline:journal-sync-scan', async (_event, payload = {}) => {
   if (activeJournalSync) return failure('busy', 'Another journal synchronization is active.');
   activeJournalSync = { cancelled:false };
+  let stage = 'scan-requested';
   try {
-    const panel=createKindroidPanel(); panel.show(); panel.focus(); journalProgress('opening');
-    const adapter=new KindroidJournalAdapter(panel); await prepareKindroidSession(); await adapter.openJournalPage(payload.aiId);
-    journalProgress('selecting_scope', payload.scope); const result=await adapter.scan(payload.scope);
-    journalProgress('comparison_ready', `${result.entries.length} entries scanned`); return {ok:true,...result};
-  } catch(error) { const login=/LOGIN REQUIRED/.test(error.message); journalProgress(login?'login_required':'failed',error.message); return failure(login?'authentication':'journal_scan',error.message); }
+    journalProgress('Scan requested');
+    const panel=createJournalWindow(); panel.show(); panel.focus(); journalProgress('Journal window opened');
+    const adapter=new KindroidJournalAdapter(panel, { progress: (next, detail) => { stage = next; journalProgress(next, detail); }, cancelled: () => Boolean(activeJournalSync?.cancelled) });
+    await prepareKindroidSession(); stage = 'opening-journal-route'; journalProgress('AI ID resolved', payload.aiId);
+    const expectedRoute = `/v2/kin-settings/${encodeURIComponent(String(payload.aiId || '').trim())}/`;
+    const result = await journalTimeout((async () => { if (!panel.webContents.getURL().includes(expectedRoute)) await adapter.openJournalPage(payload.aiId); journalProgress('Journal route ready'); return adapter.scan(payload.scope); })(), 90000, stage);
+    stage = 'complete'; journalProgress('Scan completed'); journalProgress('Returning entries', String(result.entries.length));
+    return {ok:true, stage:'complete', ai_id:String(payload.aiId), ...result, diagnostics:{...result.diagnostics,url:panel.webContents.getURL()}};
+  } catch(error) {
+    const panel = journalWindow && !journalWindow.isDestroyed() ? journalWindow : null;
+    let diagnostics = { url: panel?.webContents?.getURL?.() || '' };
+    try { if (panel) diagnostics = { ...diagnostics, ...(await new KindroidJournalAdapter(panel).diagnostics()) }; } catch (_) {}
+    diagnostics = { ...diagnostics, ...(error.diagnostics || {}) };
+    stage = error.stage || stage || 'journal-scan';
+    const login=/LOGIN REQUIRED/.test(error.message); if(login)stage='authentication';
+    console.error(`[Journal Sync] Failure at ${stage}: ${error.message}\n${error.stack || ''}\nDiagnostics: ${JSON.stringify(diagnostics)}`);
+    journalProgress(login?'login_required':'failed',`${stage}: ${error.message}`);
+    return { ok:false, stage, error:error.message, message:error.message, diagnostics };
+  }
   finally { activeJournalSync=null; }
 });
 
 ipcMain.handle('lifeline:journal-sync-mutate', async (_event, payload = {}) => {
   if(activeJournalSync)return failure('busy','Another journal synchronization is active.'); activeJournalSync={cancelled:false};
-  try { const panel=createKindroidPanel();panel.show();const adapter=new KindroidJournalAdapter(panel);await adapter.openJournalPage(payload.aiId);await adapter.selectJournalScope(payload.scope);const journal=payload.journal||{};journalProgress(payload.operation==='delete'?'deleting':payload.operation==='update'?'updating':'creating');
+  try { const panel=createJournalWindow();panel.show();const adapter=new KindroidJournalAdapter(panel,{progress:journalProgress,cancelled:()=>Boolean(activeJournalSync?.cancelled)});await journalTimeout(adapter.openJournalPage(payload.aiId),30000,'opening-journal-route');await adapter.selectJournalScope(payload.scope);await adapter.waitForJournalList();const journal=payload.journal||{};journalProgress(payload.operation==='delete'?'deleting':payload.operation==='update'?'updating':'creating');
     if(payload.operation==='create'){await adapter.openNewJournalEditor();}else{await adapter.openJournalEntry(payload.remoteHandle);}
     if(payload.operation==='delete')await adapter.deleteJournalEntry();else{await adapter.replaceJournalKeywords(journal.keywords||[]);await adapter.replaceJournalDescription(journal.description||'');await adapter.saveJournalEntry();}
-    journalProgress('verifying');const scan=await adapter.scan(payload.scope);const intendedHash=payload.operation==='delete'?'':JournalSyncEngine.hashJournal(journal,payload.scope);const exact=scan.entries.filter(entry=>JournalSyncEngine.hashJournal(entry,payload.scope)===intendedHash);if(payload.operation!=='delete'&&exact.length!==1)throw new Error(payload.operation==='create'?'SAVE RESULT UNCERTAIN':'SAVE RESULT UNCERTAIN');if(payload.operation==='delete'&&scan.entries.some(entry=>String(entry.remote_handle?.visible_text||'')===String(payload.remoteHandle?.visible_text||'')))throw new Error('DELETE RESULT UNCERTAIN');return {ok:true,scan,verified:true};
-  }catch(error){journalProgress('failed',error.message);return failure('journal_mutation',error.message);}finally{activeJournalSync=null;}
+    journalProgress('verifying');const scan=await journalTimeout(adapter.scan(payload.scope),90000,'verifying-mutation');const intendedHash=payload.operation==='delete'?'':JournalSyncEngine.hashJournal(journal,payload.scope);const exact=scan.entries.filter(entry=>JournalSyncEngine.hashJournal(entry,payload.scope)===intendedHash);if(payload.operation!=='delete'&&exact.length!==1)throw new Error('SAVE RESULT UNCERTAIN');if(payload.operation==='delete'&&scan.entries.some(entry=>String(entry.remote_handle?.remote_id||entry.remote_handle?.visible_text||'')===String(payload.remoteHandle?.remote_id||payload.remoteHandle?.visible_text||'')))throw new Error('DELETE RESULT UNCERTAIN');return {ok:true,stage:'complete',scan,verified:true,remoteEntry:exact[0]||null};
+  }catch(error){console.error(`[Journal Sync] Mutation failure at ${error.stage||'journal-mutation'}: ${error.message}\n${error.stack||''}`);journalProgress('failed',error.message);return {ok:false,stage:error.stage||'journal-mutation',error:error.message,message:error.message,diagnostics:{url:journalWindow?.webContents?.getURL?.()||''}};}finally{activeJournalSync=null;}
 });
 ipcMain.handle('lifeline:journal-sync-cancel',()=>{if(activeJournalSync)activeJournalSync.cancelled=true;journalProgress('cancelled');return {ok:true};});
 ipcMain.handle('lifeline:journal-sync-status',()=>({active:Boolean(activeJournalSync)}));
@@ -653,6 +721,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
+  if (journalWindow && !journalWindow.isDestroyed()) journalWindow.hide();
   showTrayNotice();
 });
 // Closing every visible window must not stop the background tray application.

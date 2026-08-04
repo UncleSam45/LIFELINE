@@ -3,6 +3,9 @@ from pathlib import Path
 
 MAIN_JS = (Path(__file__).parent / "main.js").read_text(encoding="utf-8")
 STYLES_CSS = (Path(__file__).parent / "styles.css").read_text(encoding="utf-8")
+ELECTRON_MAIN = (Path(__file__).parent / "electron_main.cjs").read_text(encoding="utf-8")
+ELECTRON_PRELOAD = (Path(__file__).parent / "electron_preload.cjs").read_text(encoding="utf-8")
+JOURNAL_ADAPTER = (Path(__file__).parent / "kindroid_journal_adapter.cjs").read_text(encoding="utf-8")
 
 
 def test_groupmaker_auto_mode_clicks_existing_sync_button():
@@ -62,6 +65,39 @@ def test_successful_kindroid_update_auto_closes_with_notch_animation():
 def test_manual_journal_records_target_ai_id():
     assert "record.remote_ai_id = record.remote_status === 'synced'" in MAIN_JS
     assert "operation:'manual'" in MAIN_JS
+
+
+def test_journal_sync_opens_kindroid_before_starting_long_scan():
+    assert "journalSync.open({scope,aiId})" in MAIN_JS
+    assert "lifeline:journal-sync-open" in ELECTRON_PRELOAD
+    assert "ipcMain.handle('lifeline:journal-sync-open'" in ELECTRON_MAIN
+    assert "panel.show()" in ELECTRON_MAIN
+    assert "panel.focus()" in ELECTRON_MAIN
+
+
+def test_journal_open_and_scan_have_renderer_timeouts():
+    assert "boundedJournalIpc(window.lifelineElectron.journalSync.open" in MAIN_JS
+    assert "boundedJournalIpc(window.lifelineElectron.journalSync.scan" in MAIN_JS
+
+
+def test_kindroid_panel_does_not_destroy_spa_storage_when_opened():
+    panel_loader = ELECTRON_MAIN.split("async function loadKindroidPanel", 1)[1].split("function cleanGroupId", 1)[0]
+    assert "clearCache" not in panel_loader
+    assert "clearStorageData" not in panel_loader
+    assert "panel.loadURL(KINDROID_HOME_URL)" in panel_loader
+
+
+def test_journal_automation_uses_a_dedicated_window():
+    journal_handlers = ELECTRON_MAIN.split("ipcMain.handle('lifeline:journal-sync-open'", 1)[1].split("ipcMain.handle('lifeline:journal-sync-cancel'", 1)[0]
+    assert "createJournalWindow()" in journal_handlers
+    assert "createKindroidPanel()" not in journal_handlers
+
+
+def test_journal_editor_accepts_contenteditable_description_fields():
+    reader = JOURNAL_ADAPTER.split("async readJournalEditor", 1)[1].split("async returnToJournalList", 1)[0]
+    assert "[contenteditable=\"true\"]" in reader
+    assert "descriptionField.value" in reader
+    assert "descriptionField.innerText" in reader
 
 
 def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
