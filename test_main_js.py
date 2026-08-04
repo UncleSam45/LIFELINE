@@ -3,6 +3,8 @@ from pathlib import Path
 
 MAIN_JS = (Path(__file__).parent / "main.js").read_text(encoding="utf-8")
 STYLES_CSS = (Path(__file__).parent / "styles.css").read_text(encoding="utf-8")
+ELECTRON_MAIN = (Path(__file__).parent / "electron_main.cjs").read_text(encoding="utf-8")
+ELECTRON_PRELOAD = (Path(__file__).parent / "electron_preload.cjs").read_text(encoding="utf-8")
 
 
 def test_groupmaker_auto_mode_clicks_existing_sync_button():
@@ -62,6 +64,18 @@ def test_successful_kindroid_update_auto_closes_with_notch_animation():
 def test_manual_journal_records_target_ai_id():
     assert "record.remote_ai_id = record.remote_status === 'synced'" in MAIN_JS
     assert "operation:'manual'" in MAIN_JS
+
+
+def test_journal_sync_opens_kindroid_before_starting_long_scan():
+    assert "journalSync.open({scope,aiId})" in MAIN_JS
+    assert "lifeline:journal-sync-open" in ELECTRON_PRELOAD
+    assert "ipcMain.handle('lifeline:journal-sync-open'" in ELECTRON_MAIN
+    assert "panel.moveTop()" in ELECTRON_MAIN
+
+
+def test_journal_open_and_scan_have_renderer_timeouts():
+    assert "boundedJournalIpc(window.lifelineElectron.journalSync.open" in MAIN_JS
+    assert "boundedJournalIpc(window.lifelineElectron.journalSync.scan" in MAIN_JS
 
 
 def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
