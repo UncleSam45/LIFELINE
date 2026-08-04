@@ -69,13 +69,46 @@ def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
     assert "cleanGenerationIds(child.parents, childId)" in MAIN_JS
     assert "cleanGenerationIds(candidate.children, candidateId).includes(childId)" in MAIN_JS
     assert "The children are" in MAIN_JS
-    assert "sentences.join('\\n')" in MAIN_JS
+    assert "familySentences = [...childrenByPartner.entries()]" in MAIN_JS
     assert "saveBridge('Update family memory from GENERATIONS')" in MAIN_JS
+
+
+def test_family_memory_update_includes_pregnancy_status_and_progress():
+    assert "generationPregnancy = focus.pregnancy" in MAIN_JS
+    assert "directoryPregnancy = entry?.pregnancy" in MAIN_JS
+    assert "is currently pregnant${partnerPhrase}${progressPhrase}." in MAIN_JS
+    assert "is not currently pregnant." in MAIN_JS
+    assert "and the pregnancy is about" in MAIN_JS
+    assert "Math.max(0, Math.min(100, parsedProgress))" in MAIN_JS
+    assert "conversationalName(partner?.name || partnerReference, '')" in MAIN_JS
+    assert "baby`" in MAIN_JS
+    assert "[...pregnancySentences, ...familySentences].join('\\n')" in MAIN_JS
 
 
 def test_memory_field_renders_family_update_button_and_click_handler():
     assert 'id="update-family-memory"' in MAIN_JS
     assert "updateFamilyMemory(current)" in MAIN_JS
+
+
+def test_family_tab_can_edit_and_save_pregnancy_data():
+    assert 'id="generation-pregnant"' in MAIN_JS
+    assert 'id="generation-pregnancy-partner"' in MAIN_JS
+    assert 'id="generation-pregnancy-progress"' in MAIN_JS
+    assert 'id="generation-pregnancy-percent"' in MAIN_JS
+    assert 'id="save-pregnancy"' in MAIN_JS
+    assert "generation.pregnancy = pregnancy" in MAIN_JS
+    assert "current.pregnancy = { ...pregnancy }" in MAIN_JS
+    assert "saveBridge('Update pregnancy from GENERATIONS')" in MAIN_JS
+    assert ".pregnancy-card.active" in STYLES_CSS
+
+
+def test_family_relationship_changes_are_reciprocal_and_saved():
+    assert "function setGenerationRelations(person, relationKey, selectedIds)" in MAIN_JS
+    assert "relationKey === 'parents' ? 'children' : 'parents'" in MAIN_JS
+    assert "relative[reciprocalKey] = [...new Set(reciprocalIds)]" in MAIN_JS
+    assert "setGenerationRelations(generation, 'parents'" in MAIN_JS
+    assert "setGenerationRelations(generation, 'children'" in MAIN_JS
+    assert "await saveBridge('Update family relationships from GENERATIONS')" in MAIN_JS
 
 
 def test_directory_search_restores_focus_and_selection_after_render():
