@@ -73,7 +73,7 @@
 
   function parseGithubResponse(response, action) {
     let data = {};
-    try { data = response.responseText ? JSON.parse(response.responseText) : {}; } catch (_error) { /* Report HTTP status below. */ }
+    try { data = response.responseText ? JSON.parse(response.responseText) : {}; } catch (_error) {  }
     if (response.status < 200 || response.status >= 300) {
       const error = new Error(data.message || `${action} failed (${response.status}).`);
       error.status = response.status;
@@ -95,9 +95,6 @@
   }
 
   async function readTranscript(token, repoPath, attempt = 0) {
-    // A stale Contents API response supplies an obsolete blob SHA and makes the
-    // following PUT fail with "<path> does not match <sha>". Every optimistic
-    // retry must therefore bypass both the browser and intermediary caches.
     const cacheBuster = `${Date.now()}-${attempt}-${Math.random().toString(36).slice(2)}`;
     const response = await request({
       method: 'GET',
@@ -156,8 +153,6 @@
     const doc = {
       version: 2,
       group_id: id,
-      // GROUPMAKER is authoritative for membership. DOM speaker detection is only
-      // a fallback for transcript files not initialized by the frontend.
       participants: configuredParticipants.length ? [...new Set(configuredParticipants)] : (preservedParticipants.length ? preservedParticipants : detectedParticipants),
       transcript: prior.concat(appended),
     };
@@ -181,16 +176,12 @@
         await sleep(250 * (attempt + 1));
         current = await readTranscript(token, repoPath, attempt + 1);
         merged = mergeTranscript(current.doc, id, bubbles, configuredParticipants);
-        // Another writer may already have saved exactly these entries.
         if (!merged.changed) return { ...merged, repoPath };
       }
     }
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
-  // Calling mousedown, mouseup, and click separately can make React/Chakra
-  // controls handle one intended action multiple times. A native click already
-  // performs the complete activation and must be the only event we initiate.
   function clickElement(element) { element.click(); }
 
   function isThreeDots(button) {
@@ -205,8 +196,6 @@
   }
 
   function findTranscriptOption() {
-    // Kindroid has shipped the Transcript choice both with and without an
-    // explicit menu role, so exact-text buttons must remain valid candidates.
     const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;

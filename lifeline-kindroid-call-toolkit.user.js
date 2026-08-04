@@ -40,7 +40,7 @@
     try {
       const parsed = JSON.parse(global.localStorage.getItem(STORAGE_KEY));
       if (Array.isArray(parsed)) return withIds(parsed.filter((item) => item && item.label && item.message));
-    } catch (_) { /* Use defaults when browser storage is unavailable or malformed. */ }
+    } catch (_) {  }
     return withIds(DEFAULT_PRESETS);
   }
   function savePresets(presets) {

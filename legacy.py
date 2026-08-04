@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""KINDROIDXL desktop companion app.
 
-Features:
-- Auto-installs required PySide6 dependency in the active virtual environment.
-- Embeds https://kindroid.ai/home/ in a Qt WebEngine view.
-- Adds a weekly world schedule tab with API-powered reminders.
-- Persists browser profile data (cookies, local storage, etc.) in a local folder.
-- Lets the user choose whether to remember the last connected account.
-- Injects JavaScript files from ./javascripts into loaded pages.
-- Provides a tabbed UI scaffold with placeholders for future tools.
-"""
 
 from __future__ import annotations
 
@@ -50,14 +40,8 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.ffmpeg=false")
 
 
 def _configure_qt_webengine_stability_flags() -> None:
-    """Apply Chromium switches before Qt WebEngine starts.
 
-    Windows Media Foundation hardware encoding can intermittently reject the
-    output format selected by Chromium during WebRTC calls, producing
-    ``mf_video_encoder_util.cc:552 Set output type failed (0x80070057)`` and
-    leaving Kindroid calls stalled after initially working.  Prefer software
-    video encoding while leaving normal GPU compositing/rendering enabled.
-    """
+
     stability_flags = (
         "--disable-accelerated-video-encode",
         "--disable-features=MediaFoundationVideoEncoder",
@@ -98,7 +82,7 @@ CALL_SFX_RUNTIME_DISABLED_SCRIPT_NAME = "Kindroid Call Custom SFX Menu-0.1.user.
 
 
 def _default_documents_dir() -> Path:
-    """Return the KINDROIDXL storage root, preferring the dedicated D: drive."""
+
     d_drive = Path("D:/")
     if (d_drive / "KINDROIDXL").exists() or d_drive.exists():
         return d_drive
@@ -134,7 +118,7 @@ SQLITE_BACKUP_SUFFIXES = {".db", ".sqlite", ".sqlite3"}
 
 
 def _legacy_documents_kindroid_dir() -> Path:
-    """Return the previous Documents-based KINDROIDXL root for path recovery."""
+
     user_profile = os.environ.get("USERPROFILE")
     if user_profile:
         return Path(user_profile) / "Documents" / "KINDROIDXL"
@@ -142,7 +126,7 @@ def _legacy_documents_kindroid_dir() -> Path:
 
 
 def _remap_legacy_kindroid_path(value: str) -> tuple[str, bool]:
-    r"""Map old Documents\KINDROIDXL absolute paths to the active KINDROIDXL root."""
+
     text = str(value)
     if not text:
         return text, False
@@ -164,7 +148,7 @@ def _remap_legacy_kindroid_path(value: str) -> tuple[str, bool]:
 
 
 def _remap_legacy_kindroid_paths(payload: object) -> tuple[object, bool]:
-    """Recursively repair stored media/config paths after moving KINDROIDXL to D:."""
+
     if isinstance(payload, dict):
         changed = False
         repaired: dict[object, object] = {}
@@ -211,7 +195,7 @@ def _is_lifeline_memory_manager_running(script_path: Path) -> bool:
 
 
 def _python_executable_for_child_process() -> str:
-    """Return a Python interpreter that can run helper scripts beside main.py."""
+
     if not getattr(sys, "frozen", False):
         return sys.executable
 
@@ -231,7 +215,7 @@ def _python_executable_for_child_process() -> str:
 
 
 def _launch_lifeline_memory_manager() -> subprocess.Popen | None:
-    """Start the LIFELINE memory manager with folder watching enabled."""
+
     script_path = _lifeline_memory_manager_script()
     if not script_path.exists():
         print(f"[WARN] LIFELINE Memory Manager not found: {script_path}")
@@ -281,7 +265,7 @@ def _launch_lifeline_memory_manager() -> subprocess.Popen | None:
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Atomically write JSON to disk to avoid truncated files on abrupt exits."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.tmp")
     try:
@@ -299,11 +283,8 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 
 
 def ensure_dependencies() -> None:
-    """Install missing dependencies into the current Python environment.
 
-    The checks are module-based so we can guarantee runtime imports work.
-    Each missing module maps to the pip package to install in the active venv.
-    """
+
     missing_packages: list[str] = []
     for import_name, package_name in REQUIRED_PIP_PACKAGES.items():
         if importlib.util.find_spec(import_name) is None:
@@ -374,7 +355,7 @@ from modules.name_outline_delegate import NAME_OUTLINE_COLOR_ROLE, NameOutlineDe
 
 
 class KindroidWebPage(QWebEnginePage):
-    """Web page that suppresses noisy Kindroid/KXL JavaScript console output by default."""
+
 
     def acceptNavigationRequest(self, url: QUrl, nav_type, is_main_frame: bool) -> bool:  # type: ignore[override]
         if url.scheme().casefold() == "kindroidxl" and url.host().casefold() == "groupmaker":
@@ -393,10 +374,8 @@ class KindroidWebPage(QWebEnginePage):
         print(f"[KINDROID JS] {text} ({source_id}:{line_number})")
 
     def _request_groupmaker_sync_now(self) -> None:
-        # Startup can still be building GROUPMAKER while the Kindroid userscript
-        # already sees mic audio. Keep the first request alive long enough for
-        # the tab and Sync Now handler to finish initializing instead of making
-        # the user manually warm it up once.
+
+
         self._groupmaker_sync_now_pending_until_ms = int(time.monotonic() * 1000) + 120000
         self._retry_groupmaker_sync_now()
 
@@ -1367,7 +1346,7 @@ class DirectoryMindsetDialog(QDialog):
 
 
 class FamilyTreeCanvas(QWidget):
-    """Simple painted family tree surface for the DIRECTORY → TREE subtab."""
+
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1523,7 +1502,7 @@ class DirectoryTab(QWidget):
 
     DIRECTORY_FIELDS = (
         ("name", "NAME", "line"),
-        ...   # rest of tuple
+        ...
     )
 
     DIRECTORY_FIELDS = (
@@ -1797,8 +1776,8 @@ class DirectoryTab(QWidget):
         talking_row.addWidget(talking_browse_btn)
         comm_form.addRow("Idle video", idle_row)
         comm_form.addRow("Talking video", talking_row)
-        # Keep these editor fields off the main DIRECTORY page; the Video Pairs
-        # Manager owns the add/update workflow so all pair controls live in one window.
+
+
         self.communication_pairs_list = QListWidget(self)
         self.communication_pairs_list.currentRowChanged.connect(self._load_selected_communication_pair)
         self.communication_pairs_list.hide()
@@ -2898,7 +2877,7 @@ class DirectoryTab(QWidget):
         return None, None
 
     def _rank_for_directory_entry(self, directory_entry: dict) -> str:
-        """Return the current house/generations rank for a DIRECTORY entry."""
+
         _idx, person = self._find_generation_person_for_directory(directory_entry)
         if isinstance(person, dict):
             return str(person.get("rank", "")).strip()
@@ -3286,7 +3265,7 @@ class DirectoryTab(QWidget):
 
     @staticmethod
     def _asset_value(entry: dict) -> int:
-        # Legacy per-person asset scoring is disabled.
+
         return 0
 
     def _refresh_assets_indicator(self, entry: dict | None) -> None:
@@ -3477,7 +3456,7 @@ class DirectoryTab(QWidget):
         if self._current_index is None:
             QMessageBox.warning(self, "Select Person", "Select a person first.")
             return
-        # Persist unsaved UI edits before resolving rules.
+
         self._save_current_person()
         entries = self._entry_data()
         if self._current_index >= len(entries):
@@ -4360,7 +4339,7 @@ class DirectoryTab(QWidget):
         person["voice_sample_path"] = str(target)
         person["voice_sample_uploaded_at"] = history[-1]["uploaded_at"]
         person["voice_sample_history"] = history
-        # Keep the legacy audio_sample_* keys populated so older integrations keep working.
+
         person["audio_sample_file"] = target.name
         person["audio_sample_path"] = str(target)
         entries[self._current_index] = person
@@ -4652,8 +4631,8 @@ class DirectoryTab(QWidget):
     def _toggle_online_status(self) -> None:
         if self._current_index is None:
             return
-        # Always persist current form edits before any online/offline action.
-        # This avoids losing in-progress changes when server sync dialogs/actions run.
+
+
         self._save_current_person(notify_directory=False, sync_generations=False, refresh_visuals=False)
         entries = self._entry_data()
         if self._current_index >= len(entries):
@@ -5609,13 +5588,11 @@ class CommunicationAudioWorker(QObject):
             if os.name == "nt":
                 coinit_apartment = 0x2
                 result = ctypes.windll.ole32.CoInitializeEx(None, coinit_apartment)
-                # S_OK (0) and S_FALSE (1) must be balanced with CoUninitialize().
-                # RPC_E_CHANGED_MODE (0x80010106) means COM is already initialized for
-                # this thread in another apartment model, so do not uninitialize it here.
+
+
                 com_initialized = result in (0, 1)
-            # Import WASAPI-backed audio libraries only inside the capture worker.
-            # Importing soundcard on the GUI thread can initialize COM before Qt,
-            # which makes QApplication/OleInitialize fail with RPC_E_CHANGED_MODE.
+
+
             import numpy as np
             import soundcard as sc
 
@@ -5863,7 +5840,7 @@ class SettingsTab(QWidget):
 
 
 class LightModeWindow(QMainWindow):
-    """Low-impact shell with a live KINDROID page and GROUPMAKER controls."""
+
 
     def __init__(self, main_window: "KindroidMainWindow") -> None:
         super().__init__()
@@ -5995,9 +5972,7 @@ class KindroidMainWindow(QMainWindow):
         self.profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
 
         self._apply_cookie_policy(True)
-        # Keep the shared browser profile clean.  Add-on/userscript automation is
-        # installed only on the GROUPMAKER/COMMS page below so the main CALLS
-        # Kindroid panel remains an independent, unmodified Kindroid page.
+
 
         self.tabs = QTabWidget(self)
         self.light_mode_btn = QPushButton("LIGHT MODE", self)
@@ -6248,15 +6223,15 @@ class KindroidMainWindow(QMainWindow):
             self.communication_mode_toggle.setChecked(False)
         self._refresh_directory_call_list()
         self._refresh_quick_call_buttons()
-        # Do not auto-open/dock the COMMS/GROUPMAKER panel during startup.
-        # The remote is opened explicitly from the tray or GROUPMAKER controls.
+
+
         self._window_geometry_ready = True
         self._position_quick_call_row()
         self._setup_system_tray()
         self._setup_launcher_command_polling()
 
     def _setup_launcher_command_polling(self) -> None:
-        """Watch for lightweight launcher requests to show, hide, or quit the app."""
+
         self._launcher_command_timer = QTimer(self)
         self._launcher_command_timer.setInterval(250)
         self._launcher_command_timer.timeout.connect(self._process_launcher_command)
@@ -6290,7 +6265,7 @@ class KindroidMainWindow(QMainWindow):
             self._quit_from_tray()
 
     def _toggle_conversation_mode(self) -> None:
-        """Alternate Ctrl+Numpad 0 between GROUPMAKER Sync Now and the Calls page."""
+
         if self._conversation_mode_active:
             self._conversation_mode_active = False
             self.close_groupmaker_remote_for_main_window()
@@ -6310,7 +6285,7 @@ class KindroidMainWindow(QMainWindow):
         LOGGER.info("Conversation mode enabled; requested GROUPMAKER Sync Now")
 
     def enter_light_mode(self) -> None:
-        """Keep only the GROUPMAKER COMMS shell and live KINDROID panel visible."""
+
         self.lightweight_mode = True
         if hasattr(self, "_documents_backup_timer"):
             self._documents_backup_timer.stop()
@@ -6343,13 +6318,13 @@ class KindroidMainWindow(QMainWindow):
         self.activateWindow()
 
     def hide_main_window_for_groupmaker_remote(self) -> None:
-        """Hide the main shell while the GROUPMAKER remote is active."""
+
         if self.isVisible():
             self._store_window_geometry()
             self.hide()
 
     def close_groupmaker_remote_for_main_window(self) -> None:
-        """Close GROUPMAKER COMMS before presenting the main shell."""
+
         tab = getattr(self, "groupmaker_tab", None)
         if tab is not None and hasattr(tab, "close_remote_controller"):
             tab.close_remote_controller()
@@ -6373,8 +6348,8 @@ class KindroidMainWindow(QMainWindow):
             self._kindroid_tab_placeholder.show()
 
     def restore_kindroid_webview_from_control_window(self) -> None:
-        # The COMMS WINDOW is now the permanent home for the
-        # KINDROID web panel. Do not move it back into a main KINDROID tab.
+
+
         self._kindroid_webview_docked_in_control_window = True
 
     def focus_kindroid_tab_once(self) -> None:
@@ -6391,9 +6366,8 @@ class KindroidMainWindow(QMainWindow):
             directory_widget._flush_scheduled_save(force=True)  # pylint: disable=protected-access
 
     def apply_startup_launch_behavior(self) -> bool:
-        """Return True if the main window should be shown at startup."""
-        # Startup should stay in the tray only. The main window and GROUPMAKER
-        # remote are both opened explicitly from their tray icons/menus.
+
+
         if self.tray_icon is not None:
             self.hide()
             panel = getattr(self, "communication_avatar_panel", None)
@@ -7527,15 +7501,8 @@ class KindroidMainWindow(QMainWindow):
         dialog.activateWindow()
 
     def _suspend_group_communication_avatar_media(self) -> None:
-        """Pause group avatar media before Kindroid navigation/reload.
 
-        Sync Now used to clear the GROUP COMMS grid here, which destroys several
-        QMediaPlayer/QVideoWidget objects immediately before Chromium navigates.
-        That teardown race can terminate the whole Qt process without a Python
-        traceback.  Keep the existing players alive, paused, and hidden during
-        navigation; the normal refresh path can update/rebuild them after the
-        call page settles.
-        """
+
         if hasattr(self, "_group_avatar_probe_timer"):
             self._group_avatar_probe_timer.stop()
         if hasattr(self, "_avatar_audio_probe_timer"):
@@ -7730,9 +7697,7 @@ class KindroidMainWindow(QMainWindow):
         now = int(time.monotonic() * 1000)
         self._group_avatar_last_forced_audio_key = clean_key
         self._group_avatar_force_audio_until_ms = now + max(25, int(duration_ms))
-        # Do not directly set the panel audio level here. The real audio probe
-        # should remain in charge; this only gives the next audio probe tick a
-        # tiny bridge window when a speaker handoff and audio signal race.
+
 
     def _handle_group_participant_snapshot(self, result: object) -> None:
         if isinstance(result, str):
@@ -7974,7 +7939,7 @@ class KindroidMainWindow(QMainWindow):
         return host == "kindroid.ai" or host.endswith(".kindroid.ai")
 
     def _enable_web_capture_settings(self) -> None:
-        """Enable WebEngine features required by the Kindroid tab recorder."""
+
         try:
             settings = self.webpage.settings()
             attrs = getattr(QWebEngineSettings, "WebAttribute", QWebEngineSettings)
@@ -8017,13 +7982,8 @@ class KindroidMainWindow(QMainWindow):
                 page.setFeaturePermission(security_origin, feature, policy)
 
     def _handle_desktop_media_request(self, request) -> None:
-        """Accept Qt WebEngine getDisplayMedia requests.
 
-        Qt 6.7+ does not show Chromium's native screen picker automatically for
-        embedded QWebEnginePage. The app must answer desktopMediaRequested by
-        selecting a screen/window, otherwise getDisplayMedia waits forever and
-        the UI looks like it is waiting for a prompt that never appears.
-        """
+
         try:
             screens_model = request.screensModel() if hasattr(request, "screensModel") else None
             if screens_model is not None and screens_model.rowCount() > 0:
@@ -8685,8 +8645,8 @@ class KindroidMainWindow(QMainWindow):
                 continue
             position = self._normalize_location_name(str(person.get("position", "")).strip())
             activity = self._normalize_location_name(str(person.get("location", "")).strip())
-            # A previous migration briefly copied activity/calendar values into position.
-            # Treat un-sourced values that exactly match activity as activity noise, not an official place.
+
+
             if position and not (position == activity and not str(person.get("position_source", "")).strip()):
                 names.add(position)
         return names
@@ -8812,8 +8772,8 @@ class KindroidMainWindow(QMainWindow):
         return changed
 
     def sync_locations_from_calendar_events(self) -> int:
-        # Backward-compatible name: LOCATIONS are sourced only from DIRECTORY/GROUPMAKER
-        # positions. Calendar/activity text must never create visible LOCATIONS rows.
+
+
         raw_entries = self.config.get("location_entries", [])
         if not isinstance(raw_entries, list):
             raw_entries = []
@@ -9406,17 +9366,13 @@ class KindroidMainWindow(QMainWindow):
         return source.is_file() and source.suffix.lower() in SQLITE_BACKUP_SUFFIXES
 
     def _copy_backup_source(self, source: Path, target: Path) -> None:
-        """Copy a backup source, using SQLite's online backup API for live DBs."""
+
         target.parent.mkdir(parents=True, exist_ok=True)
         if not self._is_sqlite_backup_source(source):
             shutil.copy2(source, target)
             return
 
-        # SQLite opens an existing destination in-place. On Windows a previous
-        # read-only backup file can make that open fail with "attempt to write
-        # a readonly database" during startup. Always create a fresh target; if
-        # the online backup API still cannot write, fall back to a normal file
-        # copy so automatic backup never prevents the app from launching.
+
         try:
             target.chmod(0o666)
         except OSError:
@@ -9438,7 +9394,7 @@ class KindroidMainWindow(QMainWindow):
             shutil.copy2(source, target)
 
     def _write_backup_member(self, archive: zipfile.ZipFile, source: Path, arcname: str) -> None:
-        """Write a file to a ZIP, snapshotting live SQLite databases safely."""
+
         if not self._is_sqlite_backup_source(source):
             archive.write(source, arcname=arcname)
             return
@@ -9455,7 +9411,7 @@ class KindroidMainWindow(QMainWindow):
                 pass
 
     def _lifeline_memory_db_score(self, db_path: Path) -> int:
-        """Return a validity-weighted score for a LIFELINE DB candidate."""
+
         return self._lifeline_memory_db_score_tuple(db_path)[0]
 
     def _lifeline_memory_db_score_tuple(self, db_path: Path) -> tuple[int, str]:
@@ -9496,12 +9452,8 @@ class KindroidMainWindow(QMainWindow):
 
 
     def _lifeline_memory_db_restore_rank(self, db_path: Path) -> tuple[str, int]:
-        """Rank DB candidates by latest mutation first, then row count.
 
-        A cleared or pruned database can legitimately have fewer rows than an old
-        backup. Using row count first resurrects deleted/corrupt memories on the
-        next launch, so freshness must win.
-        """
+
         score, latest_ts = self._lifeline_memory_db_score_tuple(db_path)
         return (latest_ts, score)
 
@@ -9539,7 +9491,7 @@ class KindroidMainWindow(QMainWindow):
         return best_path
 
     def _restore_lifeline_memory_database_from_safety_backup(self) -> None:
-        """Restore the canonical app-data DB from the best valid external source."""
+
         LIFELINE_MEMORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         best_backup = self._best_lifeline_memory_database_backup()
         candidates = [LEGACY_LIFELINE_MEMORY_DB_PATH, best_backup]
@@ -9594,12 +9546,8 @@ class KindroidMainWindow(QMainWindow):
         return result
 
     def _critical_backup_sources(self) -> list[tuple[Path, Path]]:
-        """Return small, high-value files for automatic safety backups.
 
-        Full browser profiles, caches, avatars, and media can be very large. Those are
-        still covered by manual Export Full Backup, but the timer should only protect
-        state that changes frequently and is cheap to retain.
-        """
+
         sources = [
             CONFIG_PATH,
             CONFIG_BACKUP_PATH,
@@ -9862,8 +9810,8 @@ class KindroidMainWindow(QMainWindow):
 def main() -> int:
     app = QApplication(sys.argv)
     if QSystemTrayIcon.isSystemTrayAvailable():
-        # Keep the background process alive when the last visible window closes.
-        # Users should explicitly quit from the tray menu.
+
+
         app.setQuitOnLastWindowClosed(False)
     global _INSTANCE_GUARD
     instance_guard = QSharedMemory("KINDROIDXL_SINGLE_INSTANCE_GUARD")

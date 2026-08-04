@@ -12,11 +12,9 @@
 (function() {
     'use strict';
 
-    // Main function to run the extraction process
     function extractJournalEntries() {
         console.log('Starting journal extraction...');
-        
-        // Find and click the Global button
+
         const globalButton = document.querySelector('button[role="radio"][aria-checked="false"] .segmented-control_label__36PcJ');
         if (globalButton) {
             const parentButton = globalButton.closest('button');
@@ -33,25 +31,22 @@
             }
         }
 
-        // Wait a bit for the content to update
         setTimeout(() => {
-            // Find all journal entries
             const entries = document.querySelectorAll('.journal-sheet-v2_entry-row-body__rnzsx.v2-selectable');
             console.log(`Found ${entries.length} journal entries`);
-            
+
             const journalData = [];
-            
+
             entries.forEach((entry, index) => {
                 const titleElement = entry.querySelector('.journal-sheet-v2_entry-title__PgFaR');
                 const descriptionElement = entry.querySelector('.journal-sheet-v2_entry-description__YcLQk');
-                
+
                 if (titleElement && descriptionElement) {
                     const title = titleElement.textContent.trim();
                     const description = descriptionElement.textContent.trim();
-                    
-                    // Extract keywords from title (split by commas)
+
                     const keywords = title.split(',').map(keyword => keyword.trim());
-                    
+
                     journalData.push({
                         id: index + 1,
                         keywords: keywords,
@@ -60,31 +55,26 @@
                     });
                 }
             });
-            
-            // Create JSON object
+
             const result = {
                 timestamp: new Date().toISOString(),
                 totalEntries: journalData.length,
                 entries: journalData
             };
-            
-            // Display the floating window with JSON data
+
             displayFloatingWindow(result);
-            
+
             console.log('Journal extraction complete:', result);
-            
-        }, 1000); // 1 second delay for content to load
+
+        }, 1000);
     }
 
-    // Function to create and display floating window
     function displayFloatingWindow(data) {
-        // Remove existing window if present
         const existingWindow = document.getElementById('journal-extractor-window');
         if (existingWindow) {
             existingWindow.remove();
         }
 
-        // Create container
         const container = document.createElement('div');
         container.id = 'journal-extractor-window';
         container.style.cssText = `
@@ -106,7 +96,6 @@
             flex-direction: column;
         `;
 
-        // Header with title and close button
         const header = document.createElement('div');
         header.style.cssText = `
             display: flex;
@@ -143,7 +132,6 @@
         header.appendChild(closeButton);
         container.appendChild(header);
 
-        // Controls
         const controls = document.createElement('div');
         controls.style.cssText = `
             display: flex;
@@ -152,7 +140,6 @@
             flex-wrap: wrap;
         `;
 
-        // Copy button
         const copyButton = document.createElement('button');
         copyButton.textContent = '📋 Copy JSON';
         copyButton.style.cssText = `
@@ -174,7 +161,6 @@
             });
         };
 
-        // Download button
         const downloadButton = document.createElement('button');
         downloadButton.textContent = '💾 Download JSON';
         downloadButton.style.cssText = `
@@ -197,7 +183,6 @@
             URL.revokeObjectURL(url);
         };
 
-        // Refresh button
         const refreshButton = document.createElement('button');
         refreshButton.textContent = '🔄 Refresh';
         refreshButton.style.cssText = `
@@ -219,7 +204,6 @@
         controls.appendChild(refreshButton);
         container.appendChild(controls);
 
-        // JSON content area
         const contentArea = document.createElement('pre');
         contentArea.style.cssText = `
             flex: 1;
@@ -234,24 +218,22 @@
             white-space: pre-wrap;
             word-wrap: break-word;
         `;
-        
+
         const jsonString = JSON.stringify(data, null, 2);
         contentArea.textContent = jsonString;
 
         container.appendChild(contentArea);
         document.body.appendChild(container);
 
-        // Make window draggable
         makeDraggable(container, header);
     }
 
-    // Function to make the floating window draggable
     function makeDraggable(element, dragHandle) {
         let isDragging = false;
         let offsetX, offsetY;
 
         dragHandle.style.cursor = 'move';
-        
+
         dragHandle.addEventListener('mousedown', (e) => {
             isDragging = true;
             const rect = element.getBoundingClientRect();
@@ -275,24 +257,19 @@
         });
     }
 
-    // Wait for page to fully load and then run
     function initialize() {
-        // Check if we're on the correct page
-        if (window.location.href.includes('kindroid.ai/v2/kin-settings/') && 
+        if (window.location.href.includes('kindroid.ai/v2/kin-settings/') &&
             window.location.href.includes('tab=journal')) {
-            // Wait a bit for the page to stabilize
             setTimeout(extractJournalEntries, 1500);
         }
     }
 
-    // Run on page load
     if (document.readyState === 'complete') {
         initialize();
     } else {
         window.addEventListener('load', initialize);
     }
 
-    // Also run when URL changes (for single-page app navigation)
     let lastUrl = location.href;
     new MutationObserver(() => {
         const url = location.href;

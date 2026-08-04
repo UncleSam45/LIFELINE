@@ -91,8 +91,6 @@ const REMEMBERED_GITHUB_LOGIN_ENABLED = localStorage.getItem(REMEMBER_STORAGE_KE
 let groupmakerDraftSaveTimer = null;
 let groupmakerAutoSyncTimer = null;
 const GROUPMAKER_AUTO_SYNC_DELAY_MS = 5000;
-// Browser fallback only: keep one call tab per group without ever taking
-// ownership of (and closing) conversations the user already has open.
 const groupmakerKindroidTabs = new Map();
 
 const DIRECTORY_API_METADATA = {
@@ -395,8 +393,6 @@ function scheduleGroupmakerAutoSync() {
   if (!state.groupmakerAutoMode) return;
   groupmakerAutoSyncTimer = setTimeout(() => {
     groupmakerAutoSyncTimer = null;
-    // Auto mode must use the exact same tested path as the Update/Create
-    // button. Do not duplicate or alter GROUPMAKER synchronization here.
     document.querySelector('#gm-sync')?.click();
   }, GROUPMAKER_AUTO_SYNC_DELAY_MS);
 }
@@ -469,7 +465,6 @@ function composeGroupName() {
 
 
 
-// KINDROID API FOUNDATION — registry, client, studio helpers.
 const KINDROID_OPERATION_STATUSES = ['official', 'experimental_verified', 'experimental_unverified', 'legacy_alias', 'retired'];
 const KINDROID_API_CATEGORIES = {
   individual_chat: 'Individual Chat', group_chat: 'Group Chat', transcripts: 'Transcripts', configuration: 'Configuration',
@@ -1840,8 +1835,6 @@ function bindDirectoryEvents() {
     state.search = event.target.value;
     render();
 
-    // Rendering replaces the sidebar markup. Restore the search control's
-    // editing state so filtering does not interrupt multi-character typing.
     const search = document.querySelector('#search');
     search?.focus({ preventScroll: true });
     if (search && selectionStart !== null && selectionEnd !== null) {

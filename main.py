@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""Electron launcher for the LIFELINE frontend.
 
-The launcher intentionally does not require Node/npm.  If an Electron binary is
-not already available, it downloads the official Electron zip for the current
-platform into ``.lifeline_electron`` and launches the local Electron app shell.
-"""
+
 from __future__ import annotations
 
 import os
@@ -30,7 +26,7 @@ WINDOWS_STATUS_DLL_NOT_FOUND = 0xC0000135
 
 
 def _background_process_options(log_name: str) -> tuple[dict, object]:
-    """Return platform-correct options and an owned log stream for a service."""
+
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     log = (RUNTIME_DIR / log_name).open("a", encoding="utf-8")
     options: dict = {
@@ -52,7 +48,7 @@ def _spawn_background(command: list[str], log_name: str) -> subprocess.Popen:
     try:
         return subprocess.Popen(command, **options)
     finally:
-        # Popen duplicates/inherits this descriptor; the launcher must not retain it.
+
         log.close()
 
 
@@ -116,7 +112,7 @@ def _launch_memory_manager() -> None:
 
 
 def _verify_background_start(process: subprocess.Popen, service_name: str, log_name: str) -> None:
-    """Fail loudly when a companion exits during its initial Python/app setup."""
+
     try:
         return_code = process.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
@@ -137,7 +133,7 @@ def _verify_background_start(process: subprocess.Popen, service_name: str, log_n
 
 
 def _launch_support_services() -> None:
-    """Attempt every companion even when another companion fails to start."""
+
     failures = []
     for service_name, launcher in (
         ("Ollama", _launch_ollama),
@@ -155,7 +151,6 @@ def _launch_support_services() -> None:
             file=sys.stderr,
             flush=True,
         )
-
 
 
 def _ensure_frontend_entrypoint() -> None:
