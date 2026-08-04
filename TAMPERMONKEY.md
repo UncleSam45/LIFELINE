@@ -1,5 +1,21 @@
 # LIFELINE Kindroid transcript userscript
 
+## KINDROID XL site layer
+
+`KINDROIDXL.js` is a standalone Tampermonkey userscript loaded across the entire
+Kindroid website. Its first enhancement adds **KINDROID XL · GitHub** to Kindroid's
+`/v2/settings/` page. Open the entry to provide a GitHub username, repository,
+and fine-grained personal access token, then select **Test connection**. A
+successful GitHub REST API response saves the username and repository and shows
+an animated confirmation.
+
+The token is saved in Tampermonkey storage only when **Remember token on this
+device** is selected. Leaving it unselected removes any previously remembered
+token after the connection succeeds. The token is sent only to
+`https://api.github.com/repos/<username>/<repository>` and is never added to the
+Kindroid page's storage. To install the layer, create a new Tampermonkey script,
+replace its template with the complete contents of `KINDROIDXL.js`, and save it.
+
 ## Call message toolkit
 
 `lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
