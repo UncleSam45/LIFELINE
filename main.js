@@ -16,6 +16,7 @@ function initializeMotionExperience() {
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const revealNewContent = () => {
     if (reducedMotion) return;
+    if (root.querySelector('.app-shell.render-stable')) return;
     const selector = '.status, .asset-card, .field-grid > label, .person, .automation-entry, .news-card, .rawg-card, .relation-card';
     root.querySelectorAll(selector).forEach((element, index) => {
       element.classList.add('motion-reveal');
@@ -710,9 +711,14 @@ function generationId() {
 
 function findGenerationPersonForEntry(entry) {
   if (!entry) return null;
+  const directoryUid = String(entry.directory_uid || '').trim();
   const aiId = String(entry.ai_id || '').trim();
   const name = String(entry.name || '').trim().toLowerCase();
-  return generationPeople().find((person) => (aiId && String(person.directory_ai_id || '').trim() === aiId) || (name && String(person.name || '').trim().toLowerCase() === name)) || null;
+  const people = generationPeople();
+  return people.find((person) => directoryUid && String(person.directory_uid || '').trim() === directoryUid)
+    || people.find((person) => !String(person.directory_uid || '').trim() && aiId && String(person.directory_ai_id || '').trim() === aiId)
+    || people.find((person) => !String(person.directory_uid || '').trim() && name && String(person.name || '').trim().toLowerCase() === name)
+    || null;
 }
 
 function ensureGenerationPerson(entry) {
@@ -725,13 +731,32 @@ function ensureGenerationPerson(entry) {
   if (!String(person.id || '').trim()) person.id = generationId();
   if (!Array.isArray(person.parents)) person.parents = [];
   if (!Array.isArray(person.children)) person.children = [];
+  const savedRelations = entry.family_relationships && typeof entry.family_relationships === 'object' ? entry.family_relationships : null;
+  if (savedRelations && Array.isArray(savedRelations.parents)) person.parents = [...savedRelations.parents];
+  if (savedRelations && Array.isArray(savedRelations.children)) person.children = [...savedRelations.children];
   delete person.rank;
+  person.directory_uid = String(entry.directory_uid || '').trim();
   person.directory_ai_id = String(entry.ai_id || '').trim();
   person.name = String(entry.name || '').trim();
   person.status = String(person.status || '').trim();
   person.sex = String(person.sex || entry.gender || '').trim();
   person.notes = String(person.notes || '').trim();
   return person;
+}
+
+function mirrorGenerationRelationsToDirectory(person) {
+  const directoryUid = String(person?.directory_uid || '').trim();
+  const entry = entries().find((candidate) => String(candidate.directory_uid || '').trim() === directoryUid);
+  if (!entry) return;
+  entry.family_relationships = {
+    parents: Array.isArray(person.parents) ? [...person.parents] : [],
+    children: Array.isArray(person.children) ? [...person.children] : [],
+  };
+}
+
+function syncGenerationPeopleWithDirectory() {
+  entries().forEach((entry) => ensureGenerationPerson(ensureEntry(entry)));
+  return generationPeople();
 }
 
 function generationById() {
@@ -742,6 +767,26 @@ function cleanGenerationIds(ids, selfId = '') {
   const byId = generationById();
   const seen = new Set();
   return (Array.isArray(ids) ? ids : String(ids || '').split(/[\n,]+/)).map((id) => String(id || '').trim()).filter((id) => id && id !== selfId && byId.has(id) && !seen.has(id) && seen.add(id));
+}
+
+function setGenerationRelations(person, relationKey, selectedIds) {
+  const personId = String(person?.id || '').trim();
+  if (!personId || !['parents', 'children'].includes(relationKey)) return [];
+  const reciprocalKey = relationKey === 'parents' ? 'children' : 'parents';
+  const previousIds = cleanGenerationIds(person[relationKey], personId);
+  const nextIds = cleanGenerationIds(selectedIds, personId);
+  const nextSet = new Set(nextIds);
+  [...new Set([...previousIds, ...nextIds])].forEach((relativeId) => {
+    const relative = generationById().get(relativeId);
+    if (!relative) return;
+    const reciprocalIds = cleanGenerationIds(relative[reciprocalKey], relativeId).filter((id) => id !== personId);
+    if (nextSet.has(relativeId)) reciprocalIds.push(personId);
+    relative[reciprocalKey] = [...new Set(reciprocalIds)];
+    mirrorGenerationRelationsToDirectory(relative);
+  });
+  person[relationKey] = nextIds;
+  mirrorGenerationRelationsToDirectory(person);
+  return nextIds;
 }
 
 function generationOptions(selectedIds = [], selfId = '') {
@@ -784,11 +829,39 @@ function generationTreeMarkup(focus) {
   return `<div class="tree-board" style="--tree-rows:${rows.length}">${rows.map((row) => `<div class="tree-row">${row.map((person) => `<div class="tree-node ${person.id === focus.id ? 'focus' : ''}"><b>${escapeHtml(person.name || 'Unnamed')}</b><small>${escapeHtml(person.sex || person.id)}</small></div>`).join('')}</div>`).join('')}<div class="tree-edges">${edges.map(([from, to]) => `<span>${escapeHtml(describeGenerationPerson(from))} → ${escapeHtml(describeGenerationPerson(to))}</span>`).join('')}</div></div>`;
 }
 
+function refreshGenerationRelationshipDisplay(person) {
+  const parents = cleanGenerationIds(person.parents, person.id);
+  const children = cleanGenerationIds(person.children, person.id);
+  const tree = document.querySelector('#generations-section .tree-board');
+  if (tree) tree.outerHTML = generationTreeMarkup({ ...person, parents, children });
+  const parentPills = document.querySelector('#generation-parent-pills');
+  const childPills = document.querySelector('#generation-child-pills');
+  if (parentPills) parentPills.innerHTML = relationList(parents);
+  if (childPills) childPills.innerHTML = relationList(children);
+  const counts = document.querySelectorAll('#generations-section .generation-summary b');
+  if (counts[0]) counts[0].textContent = String(parents.length);
+  if (counts[1]) counts[1].textContent = String(children.length);
+}
+
 function renderGenerationsSection(entry) {
+  syncGenerationPeopleWithDirectory();
   const person = ensureGenerationPerson(entry);
   const parents = cleanGenerationIds(person.parents, person.id);
   const children = cleanGenerationIds(person.children, person.id);
-  return `<section id="generations-section" class="generations-card tab-panel ${state.activeEntryTab === 'family' ? 'active' : ''}"><div><p class="eyebrow">FAMILY MAP</p><h3>Relationships & household</h3><p class="sync-note">Build ancestry and descendant links with clean cards saved in config.json as generations_people.</p></div>${generationTreeMarkup({ ...person, parents, children })}<div class="generation-summary"><div><b>${parents.length}</b><span>Parents</span></div><div><b>${children.length}</b><span>Children</span></div></div><form id="generation-form" class="field-grid generation-form"><label><span>SEX</span><input data-generation-field="sex" value="${escapeHtml(person.sex || '')}" /></label><label class="wide"><span>NOTES</span><textarea data-generation-field="notes">${escapeHtml(person.notes || '')}</textarea></label></form><div class="relations-grid"><section class="relation-card"><div class="relation-card-head"><span>↑</span><div><h4>Parents & ancestry</h4><p>Choose people who sit above this profile.</p></div></div><ul class="relation-pills">${relationList(parents)}</ul><div id="generation-parents" class="relation-picker">${generationOptions(parents, person.id)}</div></section><section class="relation-card"><div class="relation-card-head"><span>↓</span><div><h4>Children & descendants</h4><p>Choose people directly below this profile.</p></div></div><ul class="relation-pills">${relationList(children)}</ul><div id="generation-children" class="relation-picker">${generationOptions(children, person.id)}</div></section></div></section>`;
+  const pregnancy = person.pregnancy && typeof person.pregnancy === 'object'
+    ? person.pregnancy
+    : entry?.pregnancy && typeof entry.pregnancy === 'object' ? entry.pregnancy : {};
+  const pregnant = pregnancy.active === true;
+  const rawProgress = Number(String(pregnancy.progress ?? '').replace(/%$/, ''));
+  const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, rawProgress)) : 0;
+  const partnerId = String(pregnancy.partner_id || '').trim();
+  const partnerChoices = generationPeople()
+    .filter((candidate) => String(candidate.id || '').trim() !== String(person.id || '').trim())
+    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')))
+    .map((candidate) => `<option value="${escapeHtml(candidate.id || '')}" ${String(candidate.id || '').trim() === partnerId ? 'selected' : ''}>${escapeHtml(candidate.name || 'Unnamed person')}</option>`)
+    .join('');
+  const unknownPartnerChoice = partnerId && !generationById().has(partnerId) ? `<option value="${escapeHtml(partnerId)}" selected>${escapeHtml(partnerId)}</option>` : '';
+  return `<section id="generations-section" class="generations-card tab-panel ${state.activeEntryTab === 'family' ? 'active' : ''}"><div><p class="eyebrow">FAMILY MAP</p><h3>Relationships & household</h3><p class="sync-note">Build ancestry, pregnancy, and descendant details saved in config.json as generations_people.</p></div>${generationTreeMarkup({ ...person, parents, children })}<div class="generation-summary"><div><b>${parents.length}</b><span>Parents</span></div><div><b>${children.length}</b><span>Children</span></div></div><section class="pregnancy-card ${pregnant ? 'active' : ''}"><div class="pregnancy-head"><div><p class="eyebrow">PREGNANCY</p><h4>${pregnant ? 'Currently pregnant' : 'Not currently pregnant'}</h4><p>Set the current status, partner, and pregnancy progression used by the Memory update.</p></div><div class="pregnancy-actions"><label class="pregnancy-toggle"><input id="generation-pregnant" type="checkbox" ${pregnant ? 'checked' : ''}><span>${pregnant ? 'ON' : 'OFF'}</span></label><button id="save-pregnancy" type="button">SAVE PREGNANCY</button></div></div><div class="pregnancy-controls"><label><span>PARTNER</span><select id="generation-pregnancy-partner" ${pregnant ? '' : 'disabled'}><option value="">Not specified</option>${unknownPartnerChoice}${partnerChoices}</select></label><label><span>PROGRESSION</span><div class="pregnancy-progress"><input id="generation-pregnancy-progress" type="range" min="0" max="100" step="1" value="${progress}" ${pregnant ? '' : 'disabled'}><input id="generation-pregnancy-percent" type="number" min="0" max="100" step="1" value="${progress}" aria-label="Pregnancy progression percentage" ${pregnant ? '' : 'disabled'}><b>%</b></div></label></div></section><form id="generation-form" class="field-grid generation-form"><label><span>SEX</span><input data-generation-field="sex" value="${escapeHtml(person.sex || '')}" /></label><label class="wide"><span>NOTES</span><textarea data-generation-field="notes">${escapeHtml(person.notes || '')}</textarea></label></form><div class="relations-grid"><section class="relation-card"><div class="relation-card-head"><span>↑</span><div><h4>Parents & ancestry</h4><p>Choose people who sit above this profile.</p></div></div><ul id="generation-parent-pills" class="relation-pills">${relationList(parents)}</ul><div id="generation-parents" class="relation-picker">${generationOptions(parents, person.id)}</div></section><section class="relation-card"><div class="relation-card-head"><span>↓</span><div><h4>Children & descendants</h4><p>Choose people directly below this profile.</p></div></div><ul id="generation-child-pills" class="relation-pills">${relationList(children)}</ul><div id="generation-children" class="relation-picker">${generationOptions(children, person.id)}</div></section></div></section>`;
 }
 
 function familyMemoryForEntry(entry) {
@@ -797,6 +870,38 @@ function familyMemoryForEntry(entry) {
   const focusId = String(focus.id).trim();
   const people = generationPeople();
   const byId = generationById();
+  const name = String(focus.name || entry?.name || 'This person').trim();
+  const generationPregnancy = focus.pregnancy;
+  const directoryPregnancy = entry?.pregnancy;
+  const pregnancy = [generationPregnancy, directoryPregnancy].find((value) => value && typeof value === 'object' && value.active === true);
+  const pregnancySentences = [];
+  const conversationalName = (value, fallback) => {
+    const cleaned = String(value || '').trim().replace(/^[^\p{L}\p{N}]+/u, '').trim();
+    return cleaned ? cleaned.split(/\s+/)[0] : fallback;
+  };
+  const firstName = conversationalName(name, 'This person');
+  if (pregnancy) {
+    const rawProgress = typeof pregnancy.progress === 'string' ? pregnancy.progress.trim().replace(/%$/, '') : pregnancy.progress;
+    const parsedProgress = Number(rawProgress);
+    const hasProgress = rawProgress !== undefined && rawProgress !== null && String(rawProgress).trim() !== '';
+    const progress = hasProgress && Number.isFinite(parsedProgress) ? Math.max(0, Math.min(100, parsedProgress)) : null;
+    const partnerReference = String(pregnancy.partner_id || '').trim();
+    let partnerName = '';
+    if (partnerReference) {
+      const partner = byId.get(partnerReference) || people.find((person) =>
+        String(person.directory_ai_id || '').trim() === partnerReference
+        || String(person.name || '').trim().toLowerCase() === partnerReference.toLowerCase()
+      );
+      partnerName = conversationalName(partner?.name || partnerReference, '');
+    }
+    const partnerPhrase = partnerName ? ` with ${partnerName}${/s$/i.test(partnerName) ? "'" : "'s"} baby` : '';
+    const progressPhrase = progress === null
+      ? ''
+      : `, and the pregnancy is about ${Number.isInteger(progress) ? progress : progress.toFixed(1)}% along`;
+    pregnancySentences.push(`${firstName} is currently pregnant${partnerPhrase}${progressPhrase}.`);
+  } else {
+    pregnancySentences.push(`${firstName} is not currently pregnant.`);
+  }
   const children = people.filter((person) => {
     const childId = String(person.id || '').trim();
     return childId && childId !== focusId && (
@@ -820,15 +925,12 @@ function familyMemoryForEntry(entry) {
       childrenByPartner.set(partnerId, partnerChildren);
     });
   });
-  if (!children.length) return { text: '', reason: 'No children are linked to this person in GENERATIONS.' };
-  if (!childrenByPartner.size) return { text: '', reason: 'The linked children do not have another parent or shared-child partner established in GENERATIONS.' };
   const sex = String(focus.sex || entry?.gender || '').trim().toLowerCase();
   const feminine = /female|woman|girl|mother|she|her/.test(sex);
   const masculine = /male|man|boy|father|he|his/.test(sex);
   const pronoun = feminine ? 'her' : masculine ? 'his' : 'their';
   const partnerRole = feminine ? "the children's father" : masculine ? "the children's mother" : "the children's other parent";
-  const name = String(focus.name || entry?.name || 'This person').trim();
-  const sentences = [...childrenByPartner.entries()]
+  const familySentences = [...childrenByPartner.entries()]
     .sort(([left], [right]) => String(byId.get(left)?.name || '').localeCompare(String(byId.get(right)?.name || '')))
     .map(([partnerId, partnerChildren]) => {
       const partnerName = String(byId.get(partnerId)?.name || 'Unknown partner').trim();
@@ -837,7 +939,7 @@ function familyMemoryForEntry(entry) {
       const names = childNames.length === 1 ? childNames[0] : `${childNames.slice(0, -1).join(', ')} and ${childNames.at(-1)}`;
       return `${name}, through ${pronoun} life, had ${childNames.length} ${childWord} with ${pronoun} partner ${partnerName}, ${partnerRole}. ${childNames.length === 1 ? 'The child is' : 'The children are'} named ${names}.`;
     });
-  return { text: sentences.join('\n'), reason: '' };
+  return { text: [...pregnancySentences, ...familySentences].join('\n'), reason: '' };
 }
 
 async function updateFamilyMemory(entry) {
@@ -1517,13 +1619,39 @@ function renderDirectoryKindroidSyncModal() {
 }
 
 function renderDirectory() {
+  const previousShell = root.querySelector('.app-shell');
+  const previousEditorScroll = root.querySelector('.editor')?.scrollTop || 0;
+  const previousPeopleScroll = root.querySelector('.people-list')?.scrollTop || 0;
+  const activeElement = document.activeElement;
+  const focusState = activeElement && root.contains(activeElement) ? {
+    id: activeElement.id || '',
+    field: activeElement.dataset?.field || '',
+    generationField: activeElement.dataset?.generationField || '',
+    selectionStart: typeof activeElement.selectionStart === 'number' ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === 'number' ? activeElement.selectionEnd : null,
+  } : null;
   const list = filteredEntries();
   if (!state.selectedUid && list[0]) state.selectedUid = list[0].directory_uid;
   const current = selectedEntry();
   const onlineLabel = current?.online ? 'Available now' : 'Standing by';
   const editorContent = state.activeView === 'world' ? renderHeartbeatView() : state.activeView === 'wiki' ? renderWikiView() : renderDirectoryWorkspace(current, onlineLabel);
-  root.innerHTML = `<main class="app-shell"><button id="world-view" class="heartbeat-launch ${state.activeView === 'world' ? 'active' : ''}" type="button" aria-label="Open Heartbeat" title="Heartbeat"><img src="https://blogs.bcm.edu/wp-content/uploads/2019/08/heart-ekg-image-iStock.png" alt=""></button><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button><button id="wiki-view" class="ghost ${state.activeView === 'wiki' ? 'active' : ''}" type="button">Wiki</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button><button id="kindroid-panel-toggle" class="kindroid-panel-button ${state.kindroidPanelOpen ? 'active' : ''}" title="Open the Kindroid website in a floating desktop panel"><span>K</span><b>${state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID'}</b><small>kindroid.ai</small></button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}${renderDirectoryKindroidSyncModal()}</main>`;
+  root.innerHTML = `<main class="app-shell ${previousShell ? 'render-stable' : ''}"><button id="world-view" class="heartbeat-launch ${state.activeView === 'world' ? 'active' : ''}" type="button" aria-label="Open Heartbeat" title="Heartbeat"><img src="https://blogs.bcm.edu/wp-content/uploads/2019/08/heart-ekg-image-iStock.png" alt=""></button><aside class="sidebar"><nav class="view-tabs" aria-label="Main views"><button id="directory-view" class="ghost ${state.activeView === 'directory' ? 'active' : ''}" type="button">Directory</button><button id="wiki-view" class="ghost ${state.activeView === 'wiki' ? 'active' : ''}" type="button">Wiki</button></nav><div class="sync-pill" title="Sync status"><span></span><b>${escapeHtml(state.syncState)}</b><small>${escapeHtml(state.syncDetail)}</small></div><div class="search-card"><input id="search" value="${escapeHtml(state.search)}" placeholder="Search DIRECTORY…" aria-label="Search DIRECTORY"/><select id="filter" aria-label="Directory filter"><option value="active">Active</option><option value="all">All</option></select></div><div class="people-list">${list.map((entry) => `<button class="person ${entry.directory_uid === state.selectedUid ? 'selected' : ''}" data-uid="${entry.directory_uid}"><span class="avatar ${entry.online ? 'online' : ''}">${entryInitials(entry)}</span><span class="person-copy"><strong>${escapeHtml(entry.name || 'Unnamed person')}</strong><small>${escapeHtml(entry.online ? 'Live now' : 'Offline')} · ${escapeHtml(entryMeta(entry))}</small></span></button>`).join('') || '<div class="empty small">No people match this view.</div>'}</div><div class="action-stack icon-actions"><button id="add" title="Add person">＋</button><button id="remove" class="danger" title="Remove person">🗑</button><button id="settings-toggle" class="ghost" title="Settings">⚙</button><button id="groupmaker-toggle" class="ghost" title="GROUPMAKER Studio">☷</button><button id="api-studio-toggle" class="ghost" title="Kindroid API Studio">API</button><button id="kindroid-panel-toggle" class="kindroid-panel-button ${state.kindroidPanelOpen ? 'active' : ''}" title="Open the Kindroid website in a floating desktop panel"><span>K</span><b>${state.kindroidPanelOpen ? 'KINDROID OPEN' : 'OPEN KINDROID'}</b><small>kindroid.ai</small></button>${renderGroupmakerReconnectButton()}</div>${renderSettingsPanel()}</aside><section class="editor">${editorContent}</section>${renderKindroidApiStudio()}${renderGroupmakerWindow()}${renderDirectoryKindroidSyncModal()}</main>`;
   bindDirectoryEvents();
+  const editor = root.querySelector('.editor');
+  const peopleList = root.querySelector('.people-list');
+  if (editor) editor.scrollTop = previousEditorScroll;
+  if (peopleList) peopleList.scrollTop = previousPeopleScroll;
+  if (focusState) {
+    const selector = focusState.id
+      ? `#${CSS.escape(focusState.id)}`
+      : focusState.field ? `[data-field="${CSS.escape(focusState.field)}"]`
+        : focusState.generationField ? `[data-generation-field="${CSS.escape(focusState.generationField)}"]` : '';
+    const replacement = selector ? root.querySelector(selector) : null;
+    replacement?.focus({ preventScroll: true });
+    if (replacement && focusState.selectionStart !== null && typeof replacement.setSelectionRange === 'function') {
+      replacement.setSelectionRange(focusState.selectionStart, focusState.selectionEnd);
+    }
+  }
 }
 
 function fieldMarkup(entry, key, label, kind) {
@@ -2014,9 +2142,46 @@ function bindDirectoryEvents() {
     generation[e.target.dataset.generationField] = e.target.value;
     if (e.target.dataset.generationField === 'sex') current.gender = e.target.value;
   }));
+  const updatePregnancy = ({ active, partnerId, progress } = {}) => {
+    const existing = generation.pregnancy && typeof generation.pregnancy === 'object' ? generation.pregnancy : {};
+    const nextProgress = progress === undefined ? Number(existing.progress || 0) : Number(progress);
+    const pregnancy = {
+      active: active === undefined ? existing.active === true : Boolean(active),
+      partner_id: partnerId === undefined ? String(existing.partner_id || '').trim() : String(partnerId || '').trim(),
+      progress: Number.isFinite(nextProgress) ? Math.max(0, Math.min(100, nextProgress)) : 0,
+    };
+    generation.pregnancy = pregnancy;
+    current.pregnancy = { ...pregnancy };
+  };
+  document.querySelector('#generation-pregnant')?.addEventListener('change', (event) => {
+    updatePregnancy({
+      active: event.target.checked,
+      partnerId: document.querySelector('#generation-pregnancy-partner')?.value || '',
+      progress: document.querySelector('#generation-pregnancy-percent')?.value || 0,
+    });
+    render();
+  });
+  document.querySelector('#generation-pregnancy-partner')?.addEventListener('change', (event) => updatePregnancy({ partnerId: event.target.value }));
+  const pregnancyRange = document.querySelector('#generation-pregnancy-progress');
+  const pregnancyPercent = document.querySelector('#generation-pregnancy-percent');
+  pregnancyRange?.addEventListener('input', (event) => {
+    updatePregnancy({ progress: event.target.value });
+    if (pregnancyPercent) pregnancyPercent.value = event.target.value;
+  });
+  pregnancyPercent?.addEventListener('input', (event) => {
+    const progress = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+    updatePregnancy({ progress });
+    if (pregnancyRange) pregnancyRange.value = String(progress);
+  });
+  document.querySelector('#save-pregnancy')?.addEventListener('click', () => saveBridge('Update pregnancy from GENERATIONS'));
   const updateRelations = () => {
-    generation.parents = cleanGenerationIds([...document.querySelectorAll('#generation-parents input:checked')].map((input) => input.value), generation.id);
-    generation.children = cleanGenerationIds([...document.querySelectorAll('#generation-children input:checked')].map((input) => input.value), generation.id);
+    setGenerationRelations(generation, 'parents', [...document.querySelectorAll('#generation-parents input:checked')].map((input) => input.value));
+    setGenerationRelations(generation, 'children', [...document.querySelectorAll('#generation-children input:checked')].map((input) => input.value));
+    refreshGenerationRelationshipDisplay(generation);
+    queueBridgeSave('Update family relationships from GENERATIONS').catch((error) => {
+      state.syncState = 'Save failed';
+      state.syncDetail = error.message;
+    });
   };
   document.querySelectorAll('#generation-parents input, #generation-children input').forEach((input) => input.addEventListener('change', updateRelations));
 }
