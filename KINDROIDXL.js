@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         KINDROID XL
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      0.1.0
-// @description  A site-wide enhancement layer for Kindroid, beginning with secure GitHub connection settings.
+// @version      0.2.0
+// @description  A site-wide enhancement layer for Kindroid with GitHub-backed journal synchronization.
 // @match        https://kindroid.ai/*
 // @match        https://www.kindroid.ai/*
 // @grant        GM_addStyle
@@ -19,6 +19,8 @@
 
   const ENTRY_ID = 'kindroidxl-github-setting';
   const MODAL_ID = 'kindroidxl-github-modal';
+  const JOURNAL_CONTROL_ID = 'kindroidxl-journal-sync';
+  const JOURNAL_PATH = 'journal.json';
   const SETTINGS_PATH = /^\/v2\/settings\/?$/;
   const STORAGE = {
     owner: 'kindroidxl.github.owner',
@@ -30,6 +32,40 @@
   const writeValue = (key, value) => Promise.resolve(GM_setValue(key, value));
   const removeValue = (key) => Promise.resolve(GM_deleteValue(key));
   const normalize = (value) => String(value || '').trim();
+  let sessionToken = '';
+  let journalSyncing = false;
+  let journalRouteKey = '';
+
+  function githubApiRequest({ method = 'GET', url, token, body, allowNotFound = false }) {
+    return new Promise((resolve, reject) => GM_xmlhttpRequest({
+      method,
+      url,
+      data: body ? JSON.stringify(body) : undefined,
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      timeout: 20000,
+      onload(response) {
+        let data = {};
+        try { data = response.responseText ? JSON.parse(response.responseText) : {}; } catch (_error) {  }
+        if (response.status >= 200 && response.status < 300) return resolve(data);
+        if (allowNotFound && response.status === 404) return resolve(null);
+        const hints = {
+          401: 'GitHub rejected the saved token. Reconnect KINDROID XL in Settings.',
+          403: 'The token needs Contents read and write permission for this repository.',
+          404: 'The connected repository could not be found.',
+          409: 'The journal changed on GitHub while it was being saved.',
+          422: 'GitHub could not save journal.json. Check the repository permissions.',
+        };
+        return reject(Object.assign(new Error(hints[response.status] || data.message || `GitHub returned status ${response.status}.`), { status: response.status }));
+      },
+      onerror: () => reject(new Error('Could not reach GitHub. Check your connection and Tampermonkey permissions.')),
+      ontimeout: () => reject(new Error('GitHub took too long to respond. Please try again.')),
+    }));
+  }
 
   function githubRequest(owner, repo, token) {
     const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -56,6 +92,127 @@
       onerror: () => reject(new Error('Could not reach GitHub. Check your connection and Tampermonkey permissions.')),
       ontimeout: () => reject(new Error('GitHub took too long to respond. Please try again.')),
     }));
+  }
+
+  const journalUrl = (owner, repo) => `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${JOURNAL_PATH}`;
+  const decodeContent = (content) => decodeURIComponent(escape(atob(String(content || '').replace(/\s/g, ''))));
+  const encodeContent = (content) => btoa(unescape(encodeURIComponent(content)));
+
+  async function entryFingerprint(entry) {
+    const canonical = JSON.stringify([
+      normalize(entry.fullTitle).toLocaleLowerCase(),
+      normalize(entry.mainEntry).replace(/\s+/g, ' '),
+    ]);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function extractJournalEntries() {
+    const globalButton = [...document.querySelectorAll('button[role="radio"], button')]
+      .find((button) => normalize(button.textContent).toLocaleLowerCase() === 'global');
+    if (globalButton?.getAttribute('aria-checked') === 'false') {
+      globalButton.click();
+      await new Promise((resolve) => window.setTimeout(resolve, 900));
+    }
+    const rows = [...document.querySelectorAll('[class*="journal-sheet-v2_entry-row-body__"]')];
+    const entries = rows.map((row) => {
+      const title = normalize(row.querySelector('[class*="journal-sheet-v2_entry-title__"]')?.textContent);
+      const mainEntry = normalize(row.querySelector('[class*="journal-sheet-v2_entry-description__"]')?.textContent);
+      return { keywords: title.split(',').map(normalize).filter(Boolean), mainEntry, fullTitle: title };
+    }).filter((entry) => entry.fullTitle && entry.mainEntry);
+    return Promise.all(entries.map(async (entry) => ({ ...entry, id: await entryFingerprint(entry) })));
+  }
+
+  async function connectedCredentials() {
+    const [owner, repo, storedToken] = await Promise.all([
+      readValue(STORAGE.owner), readValue(STORAGE.repo), readValue(STORAGE.token),
+    ]);
+    return { owner: normalize(owner), repo: normalize(repo), token: sessionToken || normalize(storedToken) };
+  }
+
+  async function mergeAndSaveJournal(owner, repo, token, extracted, attempt = 0) {
+    const url = journalUrl(owner, repo);
+    const remote = await githubApiRequest({ url, token, allowNotFound: true });
+    let existingDocument = {};
+    if (remote?.content) {
+      try { existingDocument = JSON.parse(decodeContent(remote.content)); } catch (_error) { throw new Error('journal.json exists but is not valid JSON. Fix or remove it before syncing.'); }
+    }
+    const existing = Array.isArray(existingDocument.entries) ? existingDocument.entries : [];
+    const known = new Set(await Promise.all(existing.map((entry) => entryFingerprint(entry))));
+    const additions = extracted.filter((entry) => {
+      if (known.has(entry.id)) return false;
+      known.add(entry.id);
+      return true;
+    });
+    if (!additions.length) return { added: 0, total: existing.length };
+    const entries = [...existing, ...additions];
+    const documentToSave = { timestamp: new Date().toISOString(), totalEntries: entries.length, entries };
+    try {
+      await githubApiRequest({
+        method: 'PUT', url, token,
+        body: {
+          message: `Update Kindroid journal (${additions.length} new ${additions.length === 1 ? 'entry' : 'entries'})`,
+          content: encodeContent(`${JSON.stringify(documentToSave, null, 2)}\n`),
+          ...(remote?.sha ? { sha: remote.sha } : {}),
+        },
+      });
+      return { added: additions.length, total: entries.length };
+    } catch (error) {
+      if ((error.status === 409 || error.status === 422) && attempt < 2) return mergeAndSaveJournal(owner, repo, token, extracted, attempt + 1);
+      throw error;
+    }
+  }
+
+  function setJournalStatus(message, state = '') {
+    const control = document.getElementById(JOURNAL_CONTROL_ID);
+    if (!control) return;
+    control.querySelector('span').textContent = message;
+    control.className = state;
+  }
+
+  async function syncJournal() {
+    if (journalSyncing) return;
+    journalSyncing = true;
+    setJournalStatus('Reading journal…', 'is-working');
+    try {
+      const { owner, repo, token } = await connectedCredentials();
+      if (!owner || !repo || !token) throw new Error('Connect a repository and token from Kindroid Settings first.');
+      const entries = await extractJournalEntries();
+      if (!entries.length) throw new Error('No journal entries are visible yet. Wait for the journal to load, then retry.');
+      setJournalStatus(`Checking ${entries.length} entries…`, 'is-working');
+      const result = await mergeAndSaveJournal(owner, repo, token, entries);
+      setJournalStatus(result.added ? `Saved ${result.added} new · ${result.total} total` : `Up to date · ${result.total} total`, 'is-success');
+    } catch (error) {
+      setJournalStatus(error.message, 'is-error');
+    } finally {
+      journalSyncing = false;
+    }
+  }
+
+  function isJournalPage() {
+    return /^\/v2\/kin-settings\//.test(location.pathname) && new URLSearchParams(location.search).get('tab') === 'journal';
+  }
+
+  function mountJournalControl() {
+    if (!isJournalPage()) {
+      document.getElementById(JOURNAL_CONTROL_ID)?.remove();
+      journalRouteKey = '';
+      return;
+    }
+    if (!document.getElementById(JOURNAL_CONTROL_ID)) {
+      const button = document.createElement('button');
+      button.id = JOURNAL_CONTROL_ID;
+      button.type = 'button';
+      button.innerHTML = '<b>XL</b><span>Sync journal</span>';
+      button.title = 'Merge visible journal entries into journal.json in your connected repository';
+      button.addEventListener('click', syncJournal);
+      document.body.appendChild(button);
+    }
+    const key = `${location.pathname}${location.search}`;
+    if (journalRouteKey !== key) {
+      journalRouteKey = key;
+      window.setTimeout(syncJournal, 1800);
+    }
   }
 
   function infoIcon() {
@@ -145,6 +302,7 @@
       status.textContent = 'Contacting the GitHub REST API…';
       try {
         const repository = await githubRequest(enteredOwner, enteredRepo, enteredToken);
+        sessionToken = enteredToken;
         await Promise.all([
           writeValue(STORAGE.owner, enteredOwner),
           writeValue(STORAGE.repo, enteredRepo),
@@ -215,6 +373,9 @@
     #${ENTRY_ID} .kindroidxl-info{display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;background:transparent;color:inherit;opacity:.7;cursor:help}
     #${ENTRY_ID} .kindroidxl-info svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
     #${ENTRY_ID} .kindroidxl-pill.is-configured{color:#bfffdc!important;box-shadow:inset 0 0 0 1px #50d89055}
+    #${JOURNAL_CONTROL_ID}{position:fixed;right:18px;bottom:18px;z-index:2147483646;display:flex;align-items:center;gap:9px;max-width:min(390px,calc(100vw - 36px));min-height:44px;padding:7px 14px 7px 8px;border:1px solid #ffffff20;border-radius:14px;background:#12111bea;color:#e9e7f2;box-shadow:0 12px 40px #0009;backdrop-filter:blur(12px);cursor:pointer;font:700 12px/1.3 Inter,ui-sans-serif,system-ui,sans-serif;text-align:left}
+    #${JOURNAL_CONTROL_ID} b{display:grid;place-items:center;flex:0 0 30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#a991ff,#6b53de);color:#fff;font-size:10px}#${JOURNAL_CONTROL_ID}:hover{border-color:#a991ff88;transform:translateY(-1px)}
+    #${JOURNAL_CONTROL_ID}.is-working b{animation:kindroidxl-spin 1.1s linear infinite}#${JOURNAL_CONTROL_ID}.is-success{border-color:#50d89066;color:#bfffdc}#${JOURNAL_CONTROL_ID}.is-error{border-color:#ff718866;color:#ffb4c1}
     @keyframes kindroidxl-row-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
     #${MODAL_ID}{position:fixed;z-index:2147483647;inset:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#f7f7fb}
     #${MODAL_ID} *{box-sizing:border-box}
@@ -256,7 +417,7 @@
   `);
 
   let lastUrl = location.href;
-  const observer = new MutationObserver(mountSettingsEntry);
+  const observer = new MutationObserver(() => { mountSettingsEntry(); mountJournalControl(); });
   observer.observe(document.documentElement, { childList: true, subtree: true });
   window.setInterval(() => {
     if (location.href !== lastUrl) {
@@ -264,6 +425,8 @@
       document.getElementById(MODAL_ID)?.remove();
     }
     mountSettingsEntry();
+    mountJournalControl();
   }, 800);
   mountSettingsEntry();
+  mountJournalControl();
 }());
