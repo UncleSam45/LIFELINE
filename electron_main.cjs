@@ -18,9 +18,7 @@ const KINDROID_HOME_URL = 'https://kindroid.ai/';
 const TRAY_ICON_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiElEQVR42mNgF5T/P5CYYdQBow4YdcCQc4DBp2MD5wCQ5TA88hyAbDk1HUETB5DiOKo7gNQQYiAn7vFZQmo0UdUB2EKJkCMYiDEA3SBSHYDPLAZSNGOzjNiQwmUe0SFAq2ghuy4gJWHSpDIacAdQq3QcdQDFDRJKK6eh7wBKW0mjjdJRBwy4AwCd+c2NtKBJNgAAAABJRU5ErkJggg==';
 const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8');
 let kindroidSessionReady = null;
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
-
-if (!hasSingleInstanceLock) app.quit();
+const isPrimaryInstance = app.requestSingleInstanceLock();
 
 function launcherIsRunning(pid) {
   try {
@@ -72,6 +70,10 @@ function createMainWindow() {
   mainWindow = win;
   win.on('close', (event) => {
     if (allowQuit) return;
+    if (!isPrimaryInstance) {
+      allowQuit = true;
+      return;
+    }
     event.preventDefault();
     win.hide();
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
@@ -80,6 +82,7 @@ function createMainWindow() {
   win.on('closed', () => {
     mainWindow = null;
     if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.close();
+    if (!isPrimaryInstance) app.quit();
   });
   win.loadFile(path.join(APP_ROOT, 'index.html'));
   return win;
@@ -613,11 +616,12 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
 });
 
 app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache();
   showMainWindow();
 });
 
-if (hasSingleInstanceLock) app.whenReady().then(() => {
-  createTray();
+app.whenReady().then(() => {
+  if (isPrimaryInstance) createTray();
   createMainWindow();
 });
 app.on('activate', showMainWindow);
