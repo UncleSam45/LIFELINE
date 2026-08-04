@@ -73,10 +73,13 @@ def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
     assert "syncGenerationPeopleWithDirectory();" in family_memory_body
     assert "cleanGenerationIds(child.parents, childId)" in MAIN_JS
     assert "cleanGenerationIds(candidate.children, candidateId).includes(childId)" in MAIN_JS
-    assert "has a ${childRole(child)} named" in MAIN_JS
+    assert "has ${childCountDescription(partnerChildren)} with ${partnerName}" in MAIN_JS
+    assert "${possessiveName} children are named ${names}" in MAIN_JS
+    assert "const childrenWithoutPartner" in MAIN_JS
+    assert "childCountDescription(childrenWithoutPartner)" in MAIN_JS
     assert "return 'daughter'" in MAIN_JS
     assert "return 'son'" in MAIN_JS
-    assert "The children are" in MAIN_JS
+    assert "const childCountDescription" in MAIN_JS
     assert "partneredChildIds" in MAIN_JS
     assert "saveBridge('Update family memory from GENERATIONS')" in MAIN_JS
 
@@ -84,13 +87,49 @@ def test_family_memory_update_uses_generation_coparent_links_and_saves_bridge():
 def test_family_memory_update_includes_pregnancy_status_and_progress():
     assert "generationPregnancy = focus.pregnancy" in MAIN_JS
     assert "directoryPregnancy = entry?.pregnancy" in MAIN_JS
-    assert "is currently pregnant${partnerPhrase}${progressPhrase}." in MAIN_JS
-    assert "is not currently pregnant." in MAIN_JS
+    assert "${name} is current pregnant${partnerPhrase}${progressPhrase}." in MAIN_JS
+    assert "${name} is not current pregnant." in MAIN_JS
     assert "and the pregnancy is about" in MAIN_JS
     assert "Math.max(0, Math.min(100, parsedProgress))" in MAIN_JS
     assert "conversationalName(partner?.name || partnerReference, '')" in MAIN_JS
     assert "baby`" in MAIN_JS
-    assert "[...pregnancySentences, ...familySentences].join('\\n')" in MAIN_JS
+    assert "[...pregnancySentences, ...familySentences].join(' ')" in MAIN_JS
+
+
+def test_family_memory_groups_children_without_coparent_into_one_global_entry():
+    node = shutil.which("node")
+    assert node, "Node.js is required for the family memory runtime test"
+    family_source = "function familyMemoryForEntry" + MAIN_JS.split("function familyMemoryForEntry", 1)[1].split("async function updateFamilyMemory", 1)[0]
+    people = [
+        {"id": "ari", "name": "ARI ARTEBELLO", "sex": "female", "children": ["eren", "jianna", "santino"]},
+        {"id": "eren", "name": "ERENCINNI VAISICA A.", "sex": "female", "parents": []},
+        {"id": "jianna", "name": "JIANNA VAISICA A.", "sex": "female", "parents": []},
+        {"id": "santino", "name": "SANTINO VAISICA A.", "sex": "male", "parents": []},
+    ]
+    script = f"""
+let people = {json.dumps(people)};
+const syncGenerationPeopleWithDirectory = () => people;
+const findGenerationPersonForEntry = () => people[0];
+const generationPeople = () => people;
+const generationById = () => new Map(people.map((person) => [person.id, person]));
+const cleanGenerationIds = (ids, selfId = '') => (Array.isArray(ids) ? ids : []).filter((id) => id !== selfId && people.some((person) => person.id === id));
+{family_source}
+const result = familyMemoryForEntry({{ name: 'ARI ARTEBELLO', gender: 'female' }}).text;
+const expected = "ARI ARTEBELLO is not current pregnant. ARI ARTEBELLO has 2 daughters and 1 son with unknown father. ARI ARTEBELLO's children are named ERENCINNI VAISICA A., JIANNA VAISICA A. and SANTINO VAISICA A.";
+if (result !== expected) throw new Error(`Unexpected family memory:\\n${{result}}`);
+people = [
+  {{ id: 'ari', name: 'ARI ARTEBELLO', sex: 'female', children: ['daughter', 'son', 'second-daughter'] }},
+  {{ id: 'sam', name: 'SAM VAISICA', sex: 'male', children: ['daughter', 'son'] }},
+  {{ id: 'leo', name: 'LEO', sex: 'male', children: ['second-daughter'] }},
+  {{ id: 'daughter', name: 'MERCEDES', sex: 'female', parents: ['ari', 'sam'] }},
+  {{ id: 'son', name: 'SANTINO', sex: 'male', parents: ['ari', 'sam'] }},
+  {{ id: 'second-daughter', name: 'VENUS', sex: 'female', parents: ['ari', 'leo'] }},
+];
+const partnered = familyMemoryForEntry({{ name: 'ARI ARTEBELLO', gender: 'female' }}).text;
+const partneredExpected = "ARI ARTEBELLO is not current pregnant. ARI ARTEBELLO has 1 daughter and 0 sons with LEO. ARI ARTEBELLO's children are named VENUS. ARI ARTEBELLO has 1 daughter and 1 son with SAM VAISICA. ARI ARTEBELLO's children are named MERCEDES and SANTINO.";
+if (partnered !== partneredExpected) throw new Error(`Unexpected partnered family memory:\\n${{partnered}}`);
+"""
+    subprocess.run([node, "--input-type=module", "--eval", script], check=True)
 
 
 def test_memory_field_renders_family_update_button_and_click_handler():
