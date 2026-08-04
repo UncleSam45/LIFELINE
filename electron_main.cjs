@@ -14,12 +14,7 @@ const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
 const KINDROID_PARTITION = 'persist:lifeline-kindroid';
 const KINDROID_HOME_URL = 'https://kindroid.ai/';
-// Keep the small PNG in code so installers and pull requests do not need a
-// separate binary image asset. Unlike the former SVG data URL, this decodes to
-// a native bitmap reliably on Windows, Linux, and macOS.
 const TRAY_ICON_PNG = 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAiElEQVR42mNgF5T/P5CYYdQBow4YdcCQc4DBp2MD5wCQ5TA88hyAbDk1HUETB5DiOKo7gNQQYiAn7vFZQmo0UdUB2EKJkCMYiDEA3SBSHYDPLAZSNGOzjNiQwmUe0SFAq2ghuy4gJWHSpDIacAdQq3QcdQDFDRJKK6eh7wBKW0mjjdJRBwy4AwCd+c2NtKBJNgAAAABJRU5ErkJggg==';
-// The same standalone userscript is injected by Electron and installed directly
-// in Tampermonkey, keeping a single source of truth for the call-page UI.
 const KINDROID_TOOLKIT_SOURCE = require('fs').readFileSync(path.join(APP_ROOT, 'lifeline-kindroid-call-toolkit.user.js'), 'utf8');
 let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -32,9 +27,6 @@ function kindroidWebPreferences() {
 
 function prepareKindroidSession() {
   if (!kindroidSessionReady) {
-    // The persistent partition owns Kindroid's cookies, local storage, cache,
-    // and service worker. Do not clear any of them during startup: doing so can
-    // invalidate the SPA boot sequence and authentication stored by Kindroid.
     kindroidSessionReady = Promise.resolve();
   }
   return kindroidSessionReady;
@@ -104,9 +96,6 @@ function showTrayNotice() {
 }
 
 function quitApplication() {
-  // This is deliberately the only normal path that is allowed to terminate
-  // LIFELINE. A close request from a window or renderer must leave the tray
-  // process and its background work running.
   allowQuit = true;
   app.quit();
 }
@@ -239,7 +228,6 @@ function removeStoredPageNoise(entries) {
 
 function transcriptTextEntries(existing) {
   if (Array.isArray(existing?.transcript)) return existing.transcript.map(normalizeText).filter(Boolean);
-  // One-way migration from the older diagnostic-heavy document shape.
   return removeStoredPageNoise(existing?.entries).map((entry) => normalizeText(entry?.text)).filter(Boolean);
 }
 
@@ -352,8 +340,6 @@ async function extractCallTranscript(win) {
       const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
       const exact = candidates.find((option) => visible(option) && isTranscriptOption(option));
       if (exact) return exact;
-      // Kindroid has changed the Transcript icon without changing the menu
-      // label. Retain the narrow exact-label fallback from the legacy bridge.
       const label = [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, button p, [role='option'], [role='menuitem'], button")]
         .find((element) => visible(element) && /^Transcript$/i.test(textOf(element)));
       return label?.closest?.("[role='option'], [role='menuitem'], button") || null;
@@ -503,8 +489,6 @@ async function navigateTranscriptWindow(win, sourceUrl, groupId) {
       const onFail = (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
         if (!isMainFrame) return;
         const error = Object.assign(new Error(`${errorDescription} (${errorCode}) loading '${validatedURL || sourceUrl}'`), { code: errorCode });
-        // Give Kindroid's client-side router a short opportunity to commit a
-        // replacement navigation before treating the initial failure as final.
         clearTimeout(failureTimer);
         failureTimer = setTimeout(() => finish({ error }), 2000);
       };
@@ -581,18 +565,12 @@ ipcMain.handle('lifeline:fetch-group-transcript', async (_event, payload = {}) =
   const repoPath = `transcripts/${groupId}/transcript.json`;
   try {
     const win = getTranscriptWindow(groupId);
-    // Reuse the already-running GROUPMAKER call. Reloading it here tears down
-    // the live call and can leave Kindroid's SPA on a blank page. Only navigate
-    // when capture was requested before a call window existed.
     if (!isExpectedGroupPage(win.webContents.getURL(), groupId)) {
       await navigateTranscriptWindow(win, sourceUrl, groupId);
     }
     if (isKindroidAuthenticationPage(win.webContents.getURL())) {
       return failure('authentication', 'Kindroid authentication is required before a transcript can be captured.', { groupId, sourceUrl });
     }
-    // Let the call controls settle, open Kindroid's Transcript panel through
-    // its exact three-dot menu, and extract only transcript entries from the
-    // transcript row containers. Page chrome never participates in capture.
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const extraction = await extractCallTranscript(win);
     if (isLoginPageText(extraction.pageText)) {
@@ -625,5 +603,4 @@ app.on('before-quit', (event) => {
   if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
   showTrayNotice();
 });
-// Closing every visible window must not stop the background tray application.
 app.on('window-all-closed', () => {});

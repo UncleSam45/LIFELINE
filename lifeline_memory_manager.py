@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-"""Standalone LIFELINE Memory Manager.
 
-The app polls transcript JSON documents in LIFELINE_BRIDGE through GitHub's REST
-API, buffers newly appended entries, asks Ollama for structured memories, and
-stores raw chunks/events/keyword summaries in SQLite.
-"""
+
 from __future__ import annotations
 
 import argparse
@@ -57,7 +53,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 def _default_documents_dir() -> Path:
-    """Return the KINDROIDXL storage root, preferring the dedicated D: drive."""
+
     d_drive = Path("D:/")
     if (d_drive / "KINDROIDXL").exists() or d_drive.exists():
         return d_drive
@@ -111,18 +107,18 @@ def _bridge_token() -> str:
 
 
 def _credential_settings() -> QSettings:
-    """Return the stable, file-backed credential store used by every launch mode."""
+
     CREDENTIALS_PATH.parent.mkdir(parents=True, exist_ok=True)
     return QSettings(str(CREDENTIALS_PATH), QSettings.IniFormat)
 
 
 def _participant_ai_map(config: Dict[str, Any], group_id: str) -> Dict[str, str]:
-    """Resolve participant names to AI IDs from both group and directory data."""
+
     directory: Dict[str, str] = {}
     sources = (
         (config.get("directory_entries", []), "ai_id"),
-        # The frontend mirrors directory identities into its family-map data.
-        # This is a valuable recovery source for older or partially merged files.
+
+
         (config.get("generations_people", []), "directory_ai_id"),
     )
     for rows, id_key in sources:
@@ -144,7 +140,7 @@ def _participant_ai_map(config: Dict[str, Any], group_id: str) -> Dict[str, str]
 
 
 def _decode_bridge_config(data: bytes) -> Dict[str, Any]:
-    """Normalize current object configs and legacy directory-only arrays."""
+
     try:
         payload = json.loads(data.decode("utf-8")) if data else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -155,7 +151,7 @@ def _decode_bridge_config(data: bytes) -> Dict[str, Any]:
 
 
 class GitHubBridge:
-    """Small GitHub Contents API client shared by transcript restore and DB backups."""
+
 
     def __init__(self, token: str = "") -> None:
         self.token = token.strip() or _bridge_token()
@@ -197,12 +193,12 @@ class GitHubBridge:
 
     @staticmethod
     def _git_blob_sha(data: bytes) -> str:
-        """Return the object ID GitHub assigns to an uploaded file payload."""
+
         header = f"blob {len(data)}\0".encode("ascii")
         return hashlib.sha1(header + data).hexdigest()
 
     def write_and_verify_bytes(self, path: str, data: bytes, message: str) -> None:
-        """Upload bytes and verify the accepted blob without relying on a stale ref read."""
+
         uploaded_sha = self.write_bytes(path, data, message)
         if uploaded_sha and uploaded_sha == self._git_blob_sha(data):
             return
@@ -221,7 +217,7 @@ class GitHubBridge:
         return payload if isinstance(payload, list) else []
 
     def validate_access(self) -> None:
-        """Verify that the token can read the configured private bridge repo."""
+
         response = requests.get(
             f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}",
             headers=self._headers(), timeout=30,
@@ -229,12 +225,10 @@ class GitHubBridge:
         response.raise_for_status()
 
     def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str, List[str]]]:
-        """Return transcript content plus optional AI IDs mapped from bridge configuration."""
+
         documents: List[Tuple[str, List[str], List[str], str, List[str]]] = []
-        # The frontend restores from the richest current/legacy bridge file.
-        # Read the same paths and merge identity maps so a valid ID cannot be
-        # hidden merely because directory and GROUPMAKER data live in different
-        # snapshots. Later entries take precedence, with config.json last.
+
+
         configs: List[Dict[str, Any]] = []
         for config_path in reversed(BRIDGE_CONFIG_PATHS):
             config_data, _config_sha = self.read_bytes(config_path)
@@ -289,11 +283,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     args, _unknown = parser.parse_known_args(argv)
     return args
 
-
-# ``--main-pid`` and ``--main-script`` remain accepted for compatibility with
-# older launchers, but the memory manager is intentionally standalone now.
-# It must keep running even when the Electron frontend/main.py is not open so it
-# can process bridge transcripts and restore/backup its database independently.
 
 def now_iso() -> str:
     return _dt.datetime.now().replace(microsecond=0).isoformat()
@@ -369,7 +358,7 @@ def _load_feeder_api_key() -> str:
 
 
 def _load_groupmaker_session_for_sources(source_file: str) -> Dict[str, Any]:
-    """Find the relevant active GROUPMAKER-created group for a transcript source."""
+
     try:
         import modules.groupmaker as groupmaker  # pylint: disable=import-outside-toplevel
 
@@ -567,7 +556,7 @@ class MemoryDB:
 
     @staticmethod
     def _read_app_settings(path: Path) -> Dict[str, str]:
-        """Read local UI settings so a memory restore cannot erase preferences."""
+
         if not path.is_file():
             return {}
         try:
@@ -682,7 +671,7 @@ class MemoryDB:
         return True, snapshot_msg
 
     def checked_bridge_backup(self, create_snapshot: bool = False) -> Tuple[bool, str]:
-        """Back up and retain a visible status instead of silently losing failures."""
+
         if not self.bridge.enabled:
             self.last_bridge_check = now_human()
             self.last_bridge_error = "GitHub bridge token is not configured"
@@ -770,7 +759,7 @@ class MemoryDB:
             return row is not None
 
     def chunk_already_seen_in_recent_source(self, source_file: str, content: str, recent_limit: int = 25) -> bool:
-        """Detect chunks already contained in recent processed transcript text for the same source."""
+
         normalized = _normalized_transcript_text(content)
         if not normalized:
             return False
@@ -789,7 +778,7 @@ class MemoryDB:
         return bool(recent_text and normalized in recent_text)
 
     def memory_helpers_for_transcript(self, transcript_text: str, group_people: Iterable[str]) -> List[Dict[str, str]]:
-        """Return matching memory summaries for people currently present in a GROUPMAKER group."""
+
         present = {str(name).strip().upper() for name in group_people if str(name).strip()}
         if not transcript_text.strip() or not present:
             return []
@@ -819,14 +808,13 @@ class MemoryDB:
                 continue
             seen.add(key)
             matches.append({"person": person, "keyword": keyword, "description": summary})
-            # One transcript chunk produces at most one helper. A single
-            # group message provides enough context and avoids flooding the chat
-            # when the same chunk matches many memory nodes.
+
+
             break
         return matches
 
     def updated_keyword_memories(self, hours: int = SITUATION_RECAP_LOOKBACK_HOURS) -> List[Dict[str, str]]:
-        """Return keyword summaries changed during the recap window, oldest first."""
+
         cutoff = (_dt.datetime.now() - _dt.timedelta(hours=hours)).replace(microsecond=0).isoformat()
         with self.lock, self.connect() as conn:
             rows = conn.execute(
@@ -842,7 +830,7 @@ class MemoryDB:
         return [dict(row) for row in rows]
 
     def situation_recap_due(self, group_id: str, interval_seconds: int = SITUATION_RECAP_INTERVAL_SECONDS) -> bool:
-        """Use persisted recap history so restarts cannot bypass the hourly throttle."""
+
         if not group_id:
             return False
         cutoff = (_dt.datetime.now() - _dt.timedelta(seconds=interval_seconds)).replace(microsecond=0).isoformat()
@@ -854,7 +842,7 @@ class MemoryDB:
         return row is None
 
     def claim_situation_recap(self, group_id: str, participants: Iterable[str], source_file: str) -> int:
-        """Atomically reserve the hourly recap slot across workers and app instances."""
+
         if not group_id:
             return 0
         cutoff = (_dt.datetime.now() - _dt.timedelta(seconds=SITUATION_RECAP_INTERVAL_SECONDS)).replace(microsecond=0).isoformat()
@@ -874,7 +862,7 @@ class MemoryDB:
             return int(cursor.lastrowid)
 
     def complete_situation_recap(self, recap_id: int, recap: str, group_sent: bool, direct_sent: int) -> None:
-        """Complete a previously claimed recap slot after generation and delivery."""
+
         with self.lock, self.connect() as conn:
             conn.execute(
                 "UPDATE situation_recaps SET recap=?,group_sent=?,direct_sent=? WHERE id=?",
@@ -896,7 +884,7 @@ class MemoryDB:
 
 
     def clear_all_memory(self) -> Tuple[int, str]:
-        """Delete all stored memory data while preserving app settings and a backup snapshot."""
+
         ok, snapshot = self.mirror_to_external_backup(create_snapshot=True)
         if not ok:
             raise RuntimeError(f"Backup snapshot failed; memory was not cleared: {snapshot}")
@@ -935,7 +923,7 @@ class MemoryDB:
         return deleted, snapshot
 
     def clear_finder_memory(self) -> Tuple[int, str]:
-        """Forget processed transcript chunks without deleting extracted memories."""
+
         ok, snapshot = self.mirror_to_external_backup(create_snapshot=True)
         if not ok:
             raise RuntimeError(f"Backup snapshot failed; finder memory was not cleared: {snapshot}")
@@ -1055,7 +1043,7 @@ class MemoryDB:
             return conn.execute("SELECT p.name, kn.keyword, kn.id FROM people p LEFT JOIN keyword_nodes kn ON kn.person_id=p.id ORDER BY p.name, kn.keyword").fetchall()
 
     def explorer_nodes(self, query: str = "") -> List[sqlite3.Row]:
-        """Return keyword nodes with enough metadata to power the expanded memory explorer."""
+
         search = f"%{query.strip().lower()}%"
         where = ""
         params: Tuple[str, ...] = ()
@@ -1095,10 +1083,8 @@ class MemoryDB:
             return {"people": conn.execute("SELECT COUNT(*) c FROM people").fetchone()["c"], "events": conn.execute("SELECT COUNT(*) c FROM memory_events").fetchone()["c"], "nodes": conn.execute("SELECT COUNT(*) c FROM keyword_nodes").fetchone()["c"], "chunks": conn.execute("SELECT COUNT(*) c FROM transcript_chunks WHERE status LIKE 'processed%'").fetchone()["c"], "waiting": conn.execute("SELECT COUNT(*) c FROM transcript_chunks WHERE status='pending'").fetchone()["c"]}
 
 
-
-
 def _ollama_candidate_paths() -> List[Path]:
-    """Return common Windows Ollama executable locations to try before API calls."""
+
     candidates: List[Path] = []
     local_app_data = os.environ.get("LOCALAPPDATA")
     user_profile = os.environ.get("USERPROFILE")
@@ -1143,7 +1129,7 @@ def _ollama_api_available(url: str, timeout: float = 1.0) -> bool:
 
 
 def _start_local_ollama_unlocked(url: str) -> Tuple[bool, str]:
-    """Start Ollama from common local installs when the configured API is local."""
+
     if not _is_local_ollama_url(url):
         return False, "configured Ollama endpoint is not local"
     if _ollama_api_available(url):
@@ -1161,10 +1147,8 @@ def _start_local_ollama_unlocked(url: str) -> Tuple[bool, str]:
         try:
             lower_name = candidate.name.lower()
             if os.name == "nt" and lower_name == "ollama app.exe":
-                # The desktop app is what the Windows installer commonly exposes.
-                # ShellExecute/os.startfile handles GUI app activation more reliably
-                # than Popen for this executable, especially when the path contains
-                # spaces, for example: ...\Ollama\ollama app.exe.
+
+
                 os.startfile(str(candidate))  # type: ignore[attr-defined]
             else:
                 command = [str(candidate), "serve"] if lower_name == "ollama.exe" else [str(candidate)]
@@ -1188,7 +1172,7 @@ def _start_local_ollama_unlocked(url: str) -> Tuple[bool, str]:
 
 
 def _start_local_ollama(url: str) -> Tuple[bool, str]:
-    """Serialize startup attempts from the UI and processing worker."""
+
     with _OLLAMA_START_LOCK:
         return _start_local_ollama_unlocked(url)
 
@@ -1312,9 +1296,8 @@ Return JSON in this exact shape:
                     raise ValueError("no subject currently present in transcript participants")
                 if not math.isfinite(conf):
                     raise ValueError(f"invalid confidence {conf}")
-                # The gate is inclusive: a memory marked 0.90 must pass a 0.90
-                # threshold.  The epsilon only absorbs floating-point parsing
-                # noise and does not admit a meaningfully lower confidence.
+
+
                 if conf + self.CONFIDENCE_EPSILON < self.confidence:
                     raise ValueError(f"confidence {conf} below threshold {self.confidence}")
                 if mtype not in VALID_TYPES: raise ValueError(f"invalid type {mtype}")
@@ -1466,9 +1449,8 @@ class ProcessingWorker(QObject):
         self.remote_participants: Dict[str, List[str]] = {}
         self.remote_group_ids: Dict[str, str] = {}
         self.remote_ai_ids: Dict[str, List[str]] = {}
-        # Memory extraction may legitimately lag behind transcript intake. Keep
-        # the intake time separate so delayed chunks still become memories but
-        # cannot produce real-time memory helpers after activity has stopped.
+
+
         self.last_incoming_transcript_at: Dict[str, float] = {}
         self.next_ollama_retry = 0.0
         self.buffer = TranscriptBuffer(settings.int('chunk_size'), settings.int('minimum_idle_chunk_size'), settings.int('maximum_chunk_size'))
@@ -1486,7 +1468,7 @@ class ProcessingWorker(QObject):
         self.status.emit("Idle")
 
     def backup_bridge_database(self) -> None:
-        """Attempt the optional remote backup without interrupting memory processing."""
+
         ok, detail = self.db.checked_bridge_backup(create_snapshot=False)
         if ok:
             self.log.emit("Memory database bridge backup uploaded and verified")
@@ -1585,8 +1567,8 @@ class ProcessingWorker(QObject):
             try:
                 self.send_situation_recap(source, session, client)
             except Exception as recap_error:
-                # Recapping is an independent best-effort LLM workflow. A recap
-                # outage must not re-buffer a chunk whose memories were committed.
+
+
                 self.error.emit(f"Situation recap failed; stored memories were preserved: {recap_error}")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
         except Exception as e:
@@ -1697,7 +1679,7 @@ class ProcessingWorker(QObject):
     def send_situation_recap(
         self, source: str, session: Dict[str, Any], client: OllamaClient | None = None,
     ) -> None:
-        """Generate and deliver at most one recap per active group per hour."""
+
         if self.settings.get('situation_recaps_enabled').strip().lower() in {"0", "false", "no", "off"}:
             self.log.emit("Situation recap skipped: disabled by settings.")
             return
@@ -1739,8 +1721,8 @@ class ProcessingWorker(QObject):
             else:
                 direct_failed += 1
                 self.log.emit(f"Situation recap delivery failed for {str(name).strip()} ({ai_id}): {status}")
-        # A generated recap counts toward the interval even if a downstream API
-        # delivery fails, preventing every transcript from causing another LLM call.
+
+
         self.db.complete_situation_recap(recap_id, recap, group_ok, direct_sent)
         self.log.emit(
             f"Situation recap produced for group {group_id}: memory_updates={len(memories)}; "
@@ -1767,7 +1749,7 @@ class ProcessingWorker(QObject):
 
 
 class MemoryExplorerDialog(QDialog):
-    """Large, focused database explorer for reading and maintaining memory nodes."""
+
 
     def __init__(self, parent: "MainWindow") -> None:
         super().__init__(parent)
@@ -2118,9 +2100,8 @@ class MainWindow(QMainWindow):
                 self.show_from_tray()
 
     def load_settings(self) -> None:
-        # Migrate the original platform-dependent QSettings location once. The
-        # explicit INI path remains stable whether Python, a launcher, or a
-        # packaged executable starts the manager.
+
+
         legacy_credentials = QSettings('LIFELINE', 'MemoryManager')
         for key in ('github_token', 'kindroid_api_key'):
             if not str(self.credential_settings.value(key, '') or '').strip():
@@ -2136,7 +2117,7 @@ class MainWindow(QMainWindow):
         self.kindroid_api_key.textChanged.connect(self.save_credentials)
 
     def save_credentials(self, _value: str = '') -> None:
-        """Persist credentials immediately instead of waiting for a clean shutdown."""
+
         self.credential_settings.setValue('github_token', self.github_token.text().strip())
         self.credential_settings.setValue('kindroid_api_key', self.kindroid_api_key.text().strip())
         self.credential_settings.sync()
@@ -2148,7 +2129,7 @@ class MainWindow(QMainWindow):
         self.settings.set('confidence_threshold', self.conf.value())
 
     def save_confidence_threshold(self, value: float) -> None:
-        """Apply confidence-gate edits immediately, including while monitoring."""
+
         self.settings.set('confidence_threshold', value)
 
     def restore_geometry(self) -> None:
@@ -2163,7 +2144,7 @@ class MainWindow(QMainWindow):
         self.save_settings(); ok,msg = OllamaClient(self.url.text(), self.model.text()).check(); self.append_log(msg); self.status_label.setText(msg if not ok else 'Idle')
 
     def start_ollama_on_launch(self) -> None:
-        """Attempt to make the configured local Ollama service ready on every launch."""
+
         url = self.settings.get('ollama_url')
         self.status_label.setText('Starting Ollama')
         self.append_log(f'Checking Ollama startup at {url}…')
@@ -2225,8 +2206,8 @@ class MainWindow(QMainWindow):
     def set_output(self, tab: str, text: str) -> None:
         editor = self.tab_edits.get(tab)
         if editor is None:
-            # Worker telemetry should never terminate the application merely
-            # because a new output channel was added without a matching UI tab.
+
+
             editor = QPlainTextEdit()
             editor.setReadOnly(True)
             editor.setObjectName('TelemetryConsole')
@@ -2373,7 +2354,7 @@ class MainWindow(QMainWindow):
 
 
 def open_minimized_to_tray(window: MainWindow) -> None:
-    """Start unobtrusively, falling back to a minimized window without a tray."""
+
     if window.tray_icon:
         window.hide()
     else:

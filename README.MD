@@ -1,121 +1,65 @@
 # LIFELINE
 
-LIFELINE is an Electron desktop interface paired with the LIFELINE Memory
-Manager. The project uses `main.py` as its single startup entry point so that
-the desktop interface, Ollama, and the Memory Manager are started together.
+> **Pre-alpha prototype:** LIFELINE is experimental, incomplete, and under active development. It is not production-ready. Features, data formats, setup steps, and integrations may change or break without notice. Use it only for testing and prototyping, and keep backups of any important data.
+
+LIFELINE is a desktop prototype for organizing Kindroid-related directory data, group sessions, transcripts, journals, automations, and local long-term memory. An Electron interface works with a Python Memory Manager and a local Ollama service. `main.py` starts the complete stack.
+
+## Current components
+
+- **Desktop interface:** directory, GROUPMAKER, Kindroid panel, wiki, and automation views.
+- **Memory Manager:** processes transcript bridge data and stores local memory records.
+- **Ollama integration:** supplies local model inference for memory workflows.
+- **Userscripts:** optional Kindroid transcript, call, journal, and site helpers.
+
+These components are prototypes and should be expected to change.
 
 ## Requirements
 
 - Python 3.10 or newer
 - [Ollama](https://ollama.com/) installed locally
-- Internet access on the first launch if Electron or Python dependencies are
-  not already installed
+- Internet access when Electron or Python dependencies must be downloaded
 
-Node.js and npm are not required. The launcher uses a locally installed
-Electron binary when available and otherwise downloads Electron into
-`.lifeline_electron/`.
+Node.js and npm are not required. The launcher uses an installed Electron binary when available or downloads one into `.lifeline_electron/`.
 
-## Windows setup
+## Setup and launch
 
-Create a virtual environment in the repository and install the Memory Manager
-dependencies:
+Create a virtual environment and install the Python dependencies:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install PySide6 requests jsonschema
+```
+
+On Windows, install with:
 
 ```bat
-py -m venv .venv
 .venv\Scripts\python.exe -m pip install PySide6 requests jsonschema
 ```
 
-Then start the complete application with:
-
-```bat
-LAUNCHER.bat
-```
-
-`LAUNCHER.bat` activates `.venv` (or `venv` as a fallback) and runs
-`python main.py`. Do not launch `electron_main.cjs` directly when you want the
-complete application stack.
-
-## Direct launch
-
-On Windows, Linux, or macOS, activate the intended Python environment and run:
+Activate the environment, then run:
 
 ```bash
 python main.py
 ```
 
-The launcher performs these steps in order:
-
-1. Confirms that the Electron frontend files exist.
-2. Starts Ollama, unless its API is already responding at
-   `http://127.0.0.1:11434`.
-3. Starts `lifeline_memory_manager.py` with the same Python interpreter used to
-   run `main.py`.
-4. Opens the Electron desktop interface.
-
-Ollama and the Memory Manager are attempted independently. If either companion
-cannot start, the launcher prints an error for that service, still attempts the
-other service, and continues opening the desktop interface.
-
-## Executable overrides
-
-The launcher normally discovers executables from the active environment and
-common installation locations. These environment variables can provide an
-explicit executable when automatic discovery is not suitable:
-
-| Variable | Purpose |
-| --- | --- |
-| `LIFELINE_OLLAMA_BINARY` | Full path to the Ollama CLI or desktop executable |
-| `LIFELINE_ELECTRON_BINARY` | Full path to an Electron executable |
-| `ELECTRON_BINARY` | Alternate Electron executable override |
-
-Windows example:
+On Windows, `LAUNCHER.bat` activates `.venv` or `venv` and runs the same launcher:
 
 ```bat
-set "LIFELINE_OLLAMA_BINARY=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
 LAUNCHER.bat
 ```
 
-## Startup diagnostics
+The launcher starts Ollama when needed, starts `lifeline_memory_manager.py`, and opens the Electron interface. Do not start `electron_main.cjs` directly when you need the complete stack.
 
-Background companion output is appended to files under `.lifeline_runtime/`:
+## Optional executable overrides
 
-- `.lifeline_runtime/ollama.log`
-- `.lifeline_runtime/memory-manager.log`
+| Variable | Purpose |
+| --- | --- |
+| `LIFELINE_OLLAMA_BINARY` | Path to the Ollama CLI or desktop executable |
+| `LIFELINE_ELECTRON_BINARY` | Path to an Electron executable |
+| `ELECTRON_BINARY` | Alternate Electron executable override |
 
-When a companion exits during initial startup, `main.py` reports its exit code,
-the relevant log path, and the last available log line. If the desktop window
-opens but a companion does not, inspect these logs first.
+## Runtime data
 
-Common checks:
+Launcher logs are written to `.lifeline_runtime/`. The Memory Manager stores its database and credentials in the selected `KINDROIDXL/kindroidxl_data` directory.
 
-```bash
-# Confirm Ollama's local API is running.
-curl http://127.0.0.1:11434/api/tags
-
-# Run the Memory Manager in the foreground to see its complete output.
-python lifeline_memory_manager.py
-
-# Run launcher regression tests.
-pytest -q test_main.py
-```
-
-If Ollama is installed somewhere unusual, set `LIFELINE_OLLAMA_BINARY`. If the
-Memory Manager fails with an import error, install `PySide6`, `requests`, and
-`jsonschema` into the exact Python environment that runs `main.py`.
-
-## GROUPMAKER auto mode
-
-Auto mode waits five seconds after the last GROUPMAKER field edit, saves the
-active session, and programmatically clicks the existing Create/Update button.
-This deliberately uses the same validation, API updates, transcript preparation,
-and call-opening behavior as a manual button click.
-
-## Memory Manager data
-
-The Memory Manager stores its database and credentials in the
-`KINDROIDXL/kindroidxl_data` directory selected by the application. It prefers
-the dedicated `D:` drive on Windows, then the current user's Documents folder,
-and finally the current user's home directory.
-
-Do not commit `.lifeline_runtime/`, `.lifeline_electron/`, virtual environments,
-credentials, or local database files.
+Do not commit runtime logs, downloaded Electron files, virtual environments, credentials, or local databases. Back up prototype data before upgrades because compatibility is not guaranteed during pre-alpha development.

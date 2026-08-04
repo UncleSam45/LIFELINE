@@ -44,7 +44,7 @@
       timeout: 20000,
       onload(response) {
         let data = {};
-        try { data = response.responseText ? JSON.parse(response.responseText) : {}; } catch (_error) { /* Use the status message below. */ }
+        try { data = response.responseText ? JSON.parse(response.responseText) : {}; } catch (_error) {  }
         if (response.status >= 200 && response.status < 300) return resolve(data);
         const hints = {
           401: 'GitHub rejected this token. Check that it is current and was copied completely.',
