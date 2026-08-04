@@ -9,6 +9,7 @@ let kindroidPanel = null;
 let tray = null;
 let allowQuit = false;
 let trayNoticeShown = false;
+let launcherMonitor = null;
 const BRIDGE_OWNER = 'unclesam45';
 const BRIDGE_REPO = 'LIFELINE_BRIDGE';
 const BRIDGE_BRANCH = 'main';
@@ -20,6 +21,30 @@ let kindroidSessionReady = null;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) app.quit();
+
+function launcherIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // A permissions error still proves the process exists. ESRCH means that
+    // main.py has gone away and this Electron instance must follow it.
+    return error?.code === 'EPERM';
+  }
+}
+
+function monitorLauncher() {
+  const launcherPid = Number.parseInt(process.env.LIFELINE_LAUNCHER_PID || '', 10);
+  if (!Number.isSafeInteger(launcherPid) || launcherPid <= 1) return;
+  launcherMonitor = setInterval(() => {
+    if (launcherIsRunning(launcherPid)) return;
+    allowQuit = true;
+    app.quit();
+  }, 1000);
+  launcherMonitor.unref();
+}
+
+monitorLauncher();
 
 function kindroidWebPreferences() {
   return { contextIsolation: true, nodeIntegration: false, partition: KINDROID_PARTITION };
@@ -602,5 +627,8 @@ app.on('before-quit', (event) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   if (kindroidPanel && !kindroidPanel.isDestroyed()) kindroidPanel.hide();
   showTrayNotice();
+});
+app.on('will-quit', () => {
+  if (launcherMonitor) clearInterval(launcherMonitor);
 });
 app.on('window-all-closed', () => {});

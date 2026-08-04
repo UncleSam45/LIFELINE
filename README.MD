@@ -49,7 +49,7 @@ On Windows, `LAUNCHER.bat` activates `.venv` or `venv` and runs the same launche
 LAUNCHER.bat
 ```
 
-The launcher starts Ollama when needed, starts `lifeline_memory_manager.py`, and opens the Electron interface. Do not start `electron_main.cjs` directly when you need the complete stack.
+The launcher starts Ollama when needed, starts `lifeline_memory_manager.py`, and opens the Electron interface. Electron monitors the launcher process and exits automatically if `main.py` is stopped or killed. Do not start `electron_main.cjs` directly when you need the complete stack.
 
 ## Optional executable overrides
 
