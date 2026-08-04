@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('lifelineElectron', {
     return () => ipcRenderer.removeListener('lifeline:kindroid-panel-state', listener);
   },
   journalSync: {
+    open: (payload) => ipcRenderer.invoke('lifeline:journal-sync-open', payload),
     scan: (payload) => ipcRenderer.invoke('lifeline:journal-sync-scan', payload),
     apply: (payload) => ipcRenderer.invoke('lifeline:journal-sync-mutate', payload),
     cancel: () => ipcRenderer.invoke('lifeline:journal-sync-cancel'),
