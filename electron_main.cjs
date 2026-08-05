@@ -167,12 +167,24 @@ function createKindroidPanel() {
   return kindroidPanel;
 }
 
-async function loadKindroidPanel(panel) {
+function cleanKindroidPanelUrl(value) {
+  const fallback = KINDROID_HOME_URL;
+  try {
+    const parsed = new URL(String(value || fallback));
+    if (!['kindroid.ai', 'www.kindroid.ai'].includes(parsed.hostname)) return fallback;
+    if (!parsed.pathname.startsWith('/v2/chat/')) return fallback;
+    return parsed.toString();
+  } catch (_error) {
+    return fallback;
+  }
+}
+
+async function loadKindroidPanel(panel, targetUrl = KINDROID_HOME_URL) {
   await prepareKindroidSession();
   const kindroidSession = panel.webContents.session;
   await kindroidSession.clearCache();
   await kindroidSession.clearStorageData({ origin: KINDROID_HOME_URL, storages: ['serviceworkers', 'cachestorage'] });
-  await panel.loadURL(KINDROID_HOME_URL, { extraHeaders: 'Cache-Control: no-cache, no-store\nPragma: no-cache' });
+  await panel.loadURL(cleanKindroidPanelUrl(targetUrl), { extraHeaders: 'Cache-Control: no-cache, no-store\nPragma: no-cache' });
 }
 
 function cleanGroupId(value) {
@@ -567,13 +579,13 @@ ipcMain.handle('lifeline:open-kindroid-call', async (_event, payload = {}) => {
   return true;
 });
 
-ipcMain.handle('lifeline:toggle-kindroid-panel', async () => {
+ipcMain.handle('lifeline:toggle-kindroid-panel', async (_event, payload = {}) => {
   const panel = createKindroidPanel();
   if (panel.isVisible()) panel.hide();
   else {
     panel.show();
     panel.focus();
-    await loadKindroidPanel(panel);
+    await loadKindroidPanel(panel, payload.url);
   }
   sendKindroidPanelState();
   return kindroidPanelState();
