@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.7
+// @version      1.2.8
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -33,6 +33,7 @@
   let autoCapture = true;
   let lastUrl = location.href;
   let ui = null;
+  let transcriptPanelActivatedForCall = '';
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -232,7 +233,8 @@
   async function extractTranscript() {
     const rowSelectors = ['[class*="call-transcript-panel-v2_row__"]', '[class*="call-transcript-panel_row__"]', '[class*="transcript"][class*="row"]'];
     let rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
-    if (!rows.length) {
+    const callId = groupId();
+    if (!rows.length && transcriptPanelActivatedForCall !== callId) {
       const currentMenuButton = [...document.querySelectorAll('button[aria-label]')]
         .find((button) => visible(button) && /^Call menu$/i.test(normalizeText(button.getAttribute('aria-label'))));
       const button = currentMenuButton || [...document.querySelectorAll('button[type="button"]')]
@@ -253,6 +255,10 @@
           if (!activated && option.isConnected) pressEnter(option);
           await sleep(900);
         }
+        // Finding the exact Transcript control proves that the call menu was
+        // activated. Do not toggle that menu on every capture while an empty or
+        // not-yet-populated transcript panel is waiting for its first row.
+        if (option) transcriptPanelActivatedForCall = callId;
       }
     }
     if (!rows.length) {
@@ -329,6 +335,7 @@
   setInterval(() => {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
+    transcriptPanelActivatedForCall = '';
     setStatus(groupId() ? 'Group call changed. Preparing automatic capture…' : 'Open a Kindroid group call to capture its transcript.', groupId() ? '' : 'error');
     schedule(1000);
   }, 1000);

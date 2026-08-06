@@ -16,9 +16,11 @@ def test_userscript_supports_current_kindroid_call_menu_markup():
     assert "const activated = await waitFor" in USERSCRIPT
 
 
-def test_userscript_retries_activation_when_rows_are_still_unavailable():
-    assert "transcriptPanelAttemptedForCall" not in USERSCRIPT
-    assert "if (!rows.length) {" in USERSCRIPT
+def test_userscript_does_not_retoggle_menu_after_transcript_control_is_found():
+    assert "let transcriptPanelActivatedForCall = '';" in USERSCRIPT
+    assert "transcriptPanelActivatedForCall !== callId" in USERSCRIPT
+    assert "if (option) transcriptPanelActivatedForCall = callId;" in USERSCRIPT
+    assert "lastUrl = location.href;\n    transcriptPanelActivatedForCall = '';" in USERSCRIPT
 
 
 def test_electron_extractor_supports_current_kindroid_call_menu_markup():
@@ -29,6 +31,12 @@ def test_electron_extractor_supports_current_kindroid_call_menu_markup():
     assert "HTMLElement.prototype.click.call(element)" in ELECTRON_MAIN
     assert "new KeyboardEvent('keydown'" in ELECTRON_MAIN
     assert "const activated = await waitFor" in ELECTRON_MAIN
+
+
+def test_electron_extractor_remembers_activation_in_page_document():
+    assert "const ACTIVATED_MARKER = 'lifelineTranscriptPanelActivated';" in ELECTRON_MAIN
+    assert "document.documentElement.dataset[ACTIVATED_MARKER] === 'true'" in ELECTRON_MAIN
+    assert "document.documentElement.dataset[ACTIVATED_MARKER] = 'true';" in ELECTRON_MAIN
 
 
 def test_userscript_remembers_token_by_default_and_before_capture():

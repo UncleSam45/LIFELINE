@@ -401,7 +401,9 @@ async function extractCallTranscript(win) {
       return label?.closest?.("[role='option'], [role='menuitem'], button") || null;
     };
 
-    let opened = Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
+    const ACTIVATED_MARKER = 'lifelineTranscriptPanelActivated';
+    let opened = document.documentElement.dataset[ACTIVATED_MARKER] === 'true'
+      || Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
     if (!opened) {
       const currentMenuButton = [...document.querySelectorAll('button[aria-label]')]
         .find((button) => visible(button) && /^Call menu$/i.test(String(button.getAttribute('aria-label') || '').trim()));
@@ -420,6 +422,9 @@ async function extractCallTranscript(win) {
             || document.querySelector('[class*="call-transcript-panel"]'), 10);
           if (!activated && option.isConnected) pressEnter(option);
         }
+        // Persist activation in this page document so automatic capture does
+        // not repeatedly toggle the three-dot menu while the panel has no rows.
+        document.documentElement.dataset[ACTIVATED_MARKER] = 'true';
         await sleep(900);
         opened = true;
         break;
