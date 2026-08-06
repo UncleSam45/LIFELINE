@@ -11,7 +11,9 @@ def test_userscript_supports_current_kindroid_call_menu_markup():
     assert "['dialog', 'listbox', 'menu', 'true'].includes(popupType)" in USERSCRIPT
     assert "button[class*='call-dock-v2_menu-row__']" in USERSCRIPT
     assert "option.getAttribute('aria-pressed') !== 'true'" in USERSCRIPT
-    assert "new PointerEvent('pointerdown'" in USERSCRIPT
+    assert "HTMLElement.prototype.click.call(element)" in USERSCRIPT
+    assert "new KeyboardEvent('keydown'" in USERSCRIPT
+    assert "const activated = await waitFor" in USERSCRIPT
 
 
 def test_userscript_retries_activation_when_rows_are_still_unavailable():
@@ -24,11 +26,12 @@ def test_electron_extractor_supports_current_kindroid_call_menu_markup():
     assert "/^Call menu$/i" in ELECTRON_MAIN
     assert "button[class*='call-dock-v2_menu-row__']" in ELECTRON_MAIN
     assert "option.getAttribute('aria-pressed') !== 'true'" in ELECTRON_MAIN
-    assert "new PointerEvent('pointerdown'" in ELECTRON_MAIN
+    assert "HTMLElement.prototype.click.call(element)" in ELECTRON_MAIN
+    assert "new KeyboardEvent('keydown'" in ELECTRON_MAIN
+    assert "const activated = await waitFor" in ELECTRON_MAIN
 
 
-def test_userscript_remembers_token_by_default_and_while_typing():
+def test_userscript_remembers_token_by_default_and_before_capture():
     assert "ui.token.value = saved; ui.remember.checked = true;" in USERSCRIPT
-    assert "ui.token.addEventListener('input'" in USERSCRIPT
     capture = USERSCRIPT.split("async function capture()", 1)[1].split("function schedule", 1)[0]
     assert "GM_setValue(TOKEN_KEY, token)" in capture

@@ -354,13 +354,20 @@ async function extractCallTranscript(win) {
     const unique = (elements) => [...new Set(elements.filter(Boolean))];
     const click = (element) => {
       element.focus({ preventScroll: true });
-      if (typeof PointerEvent === 'function') {
-        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-        element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      HTMLElement.prototype.click.call(element);
+    };
+    const pressEnter = (element) => {
+      element.focus({ preventScroll: true });
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    };
+    const waitFor = async (find, attempts = 16, delay = 150) => {
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const result = find();
+        if (result) return result;
+        await sleep(attempt ? delay : 350);
       }
-      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      element.click();
+      return null;
     };
     const isThreeDots = (button) => {
       if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
@@ -401,13 +408,18 @@ async function extractCallTranscript(win) {
       const menuButtons = currentMenuButton ? [currentMenuButton] : [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
       for (const menuButton of menuButtons) {
         click(menuButton);
-        let option = null;
-        for (let attempt = 0; attempt < 16 && !option; attempt += 1) {
-          await sleep(attempt ? 150 : 350);
-          option = findTranscriptOption();
+        let option = await waitFor(findTranscriptOption);
+        if (!option) {
+          pressEnter(menuButton);
+          option = await waitFor(findTranscriptOption, 10);
         }
         if (!option) continue;
-        if (option.getAttribute('aria-pressed') !== 'true') click(option);
+        if (option.getAttribute('aria-pressed') !== 'true') {
+          click(option);
+          const activated = await waitFor(() => option.getAttribute('aria-pressed') === 'true'
+            || document.querySelector('[class*="call-transcript-panel"]'), 10);
+          if (!activated && option.isConnected) pressEnter(option);
+        }
         await sleep(900);
         opened = true;
         break;

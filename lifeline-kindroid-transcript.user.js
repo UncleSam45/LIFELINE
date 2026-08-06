@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.6
+// @version      1.2.7
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -186,13 +186,22 @@
 
   function clickElement(element) {
     element.focus({ preventScroll: true });
-    if (typeof PointerEvent === 'function') {
-      element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-      element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    HTMLElement.prototype.click.call(element);
+  }
+
+  function pressEnter(element) {
+    element.focus({ preventScroll: true });
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+  }
+
+  async function waitFor(find, attempts = 16, delay = 150) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const result = find();
+      if (result) return result;
+      await sleep(attempt ? delay : 350);
     }
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-    element.click();
+    return null;
   }
 
   function isThreeDots(button) {
@@ -230,9 +239,20 @@
         .find((candidate) => visible(candidate) && isThreeDots(candidate));
       if (button) {
         clickElement(button);
-        let option = null;
-        for (let attempt = 0; attempt < 16 && !option; attempt += 1) { await sleep(attempt ? 150 : 350); option = findTranscriptOption(); }
-        if (option && option.getAttribute('aria-pressed') !== 'true') { clickElement(option); await sleep(900); }
+        let option = await waitFor(findTranscriptOption);
+        if (!option) {
+          // Some Kindroid builds wire this accessible dialog trigger through its
+          // keyboard handler rather than accepting an untrusted pointer event.
+          pressEnter(button);
+          option = await waitFor(findTranscriptOption, 10);
+        }
+        if (option && option.getAttribute('aria-pressed') !== 'true') {
+          clickElement(option);
+          const activated = await waitFor(() => option.getAttribute('aria-pressed') === 'true'
+            || document.querySelector('[class*="call-transcript-panel"]'), 10);
+          if (!activated && option.isConnected) pressEnter(option);
+          await sleep(900);
+        }
       }
     }
     if (!rows.length) {
@@ -298,7 +318,6 @@
     ui.token.value = saved; ui.remember.checked = true;
     shadow.querySelector('.min').addEventListener('click', (event) => { ui.body.classList.toggle('hidden'); event.currentTarget.textContent = ui.body.classList.contains('hidden') ? '+' : '−'; });
     ui.capture.addEventListener('click', async () => { await capture(); schedule(CAPTURE_INTERVAL_MS); });
-    ui.token.addEventListener('input', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); });
     ui.token.addEventListener('change', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); schedule(500); });
     ui.remember.addEventListener('change', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); else GM_deleteValue(TOKEN_KEY); });
     shadow.querySelector('.forget').addEventListener('click', () => { GM_deleteValue(TOKEN_KEY); ui.token.value = ''; ui.remember.checked = false; clearTimeout(timer); setStatus('Token removed from Tampermonkey storage.'); });
