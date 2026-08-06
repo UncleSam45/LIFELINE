@@ -19,6 +19,31 @@ from lifeline_memory_manager import (
 
 
 class BridgeBackupTests(unittest.TestCase):
+    @patch("lifeline_memory_manager.requests.get")
+    def test_latest_write_time_comes_from_github_commit_history(self, get) -> None:
+        response = get.return_value
+        response.status_code = 200
+        response.json.return_value = [{
+            "commit": {"committer": {"date": "2026-08-06T12:34:56Z"}},
+        }]
+        bridge = GitHubBridge("token")
+
+        written_at = bridge.latest_write_at("transcripts/group/transcript.json")
+
+        self.assertEqual(written_at, dt.datetime(2026, 8, 6, 12, 34, 56, tzinfo=dt.timezone.utc).timestamp())
+        get.assert_called_once()
+        request_args, request_kwargs = get.call_args
+        self.assertTrue(request_args[0].endswith("/commits"))
+        self.assertEqual(request_kwargs["params"]["path"], "transcripts/group/transcript.json")
+        self.assertEqual(request_kwargs["params"]["per_page"], 1)
+
+    @patch("lifeline_memory_manager.requests.get")
+    def test_latest_write_time_is_unknown_when_github_has_no_history(self, get) -> None:
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = []
+
+        self.assertEqual(GitHubBridge("token").latest_write_at("transcripts/group/transcript.json"), 0.0)
+
     @patch.object(GitHubBridge, "read_bytes")
     @patch.object(GitHubBridge, "write_bytes", return_value="ab1891c9f4b427ab75fb1123c6dc24e211ca4885")
     def test_bridge_upload_uses_accepted_blob_sha_without_stale_readback(self, write_bytes, read_bytes) -> None:
@@ -80,6 +105,35 @@ class WorkerTestCase(unittest.TestCase):
 
 
 class MemoryHelperActivityTests(WorkerTestCase):
+    def test_poll_delivers_context_before_buffering_for_extraction(self) -> None:
+        worker = self.make_worker()
+        worker.bridge = Mock()
+        captured_at = time.time()
+        worker.bridge.transcript_documents.return_value = [(
+            "transcripts/group/transcript.json", ["Kin: launch"], ["Kin"],
+            "group", ["ai-kin"], captured_at,
+        )]
+        worker.remote_participants = {}
+        worker.remote_group_ids = {}
+        worker.remote_ai_ids = {}
+        worker.remote_entry_counts = {}
+        worker.last_incoming_transcript_at = {}
+        worker.buffer = Mock()
+        calls = []
+        worker.send_memory_helpers = Mock(side_effect=lambda *_args, **_kwargs: calls.append("helpers"))
+        worker.send_situation_recap = Mock(side_effect=lambda *_args, **_kwargs: calls.append("recap"))
+        worker.buffer.add.side_effect = lambda *_args: calls.append("buffer")
+
+        worker.poll_github_transcripts()
+
+        self.assertEqual(calls, ["helpers", "recap", "buffer"])
+        self.assertEqual(worker.last_incoming_transcript_at["transcripts/group/transcript.json"], captured_at)
+        worker.send_memory_helpers.assert_called_once_with(
+            "transcripts/group/transcript.json", "Kin: launch",
+            {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-kin"]},
+            last_incoming_at=captured_at,
+        )
+
     def test_stale_transcript_does_not_check_or_send_helpers(self) -> None:
         worker = self.make_worker()
         worker.send_memory_helpers(
@@ -156,6 +210,7 @@ class SituationRecapTests(WorkerTestCase):
         worker.send_situation_recap(
             "transcripts/group/transcript.json",
             {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-1"]}, client,
+            last_incoming_at=time.time(),
         )
         client.generate.assert_not_called()
         worker.db.updated_keyword_memories.assert_not_called()
@@ -174,13 +229,30 @@ class SituationRecapTests(WorkerTestCase):
         client.generate.return_value = ('{"recap":"Kin launched it."}', {"recap": "Kin launched it."})
         session = {"group_id": "group", "names": ["Kin", "Nova"], "ai_list": ["ai-1", "ai-2"]}
 
-        worker.send_situation_recap("transcripts/group/transcript.json", session, client)
+        worker.send_situation_recap(
+            "transcripts/group/transcript.json", session, client, last_incoming_at=time.time()
+        )
 
         client.generate.assert_called_once()
         self.assertIn("separate recap task", client.generate.call_args.args[0])
         group_send.assert_called_once_with("group", "SITUATION RECAP", "Kin launched it.")
         self.assertEqual(direct_send.call_count, 2)
         worker.db.complete_situation_recap.assert_called_once_with(42, "Kin launched it.", True, 2)
+
+    def test_stale_transcript_does_not_generate_recap(self) -> None:
+        worker = self.make_worker()
+        client = Mock()
+
+        worker.send_situation_recap(
+            "transcripts/group/transcript.json",
+            {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-1"]},
+            client,
+            last_incoming_at=time.time() - MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS - 1,
+        )
+
+        worker.db.situation_recap_due.assert_not_called()
+        client.generate.assert_not_called()
+        self.assertIn("no incoming transcript activity", worker.log.emit.call_args.args[0])
 
     def test_prompt_rejects_invention_and_database_language(self) -> None:
         prompt = SituationRecapComposer.prompt([{

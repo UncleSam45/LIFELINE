@@ -216,6 +216,29 @@ class GitHubBridge:
         payload = response.json()
         return payload if isinstance(payload, list) else []
 
+    def latest_write_at(self, path: str) -> float:
+        """Return GitHub's timestamp for the most recent commit that wrote ``path``."""
+        if not self.enabled:
+            return 0.0
+        response = requests.get(
+            f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}/commits",
+            headers=self._headers(),
+            params={"path": path.strip("/"), "sha": BRIDGE_BRANCH, "per_page": 1},
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return 0.0
+        response.raise_for_status()
+        commits = response.json()
+        if not isinstance(commits, list) or not commits or not isinstance(commits[0], dict):
+            return 0.0
+        commit = commits[0].get("commit")
+        if not isinstance(commit, dict):
+            return 0.0
+        committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+        return _parse_timestamp(committer.get("date") or author.get("date"))
+
     def validate_access(self) -> None:
 
         response = requests.get(
@@ -224,9 +247,9 @@ class GitHubBridge:
         )
         response.raise_for_status()
 
-    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str, List[str]]]:
+    def transcript_documents(self) -> List[Tuple[str, List[str], List[str], str, List[str], float]]:
 
-        documents: List[Tuple[str, List[str], List[str], str, List[str]]] = []
+        documents: List[Tuple[str, List[str], List[str], str, List[str], float]] = []
 
 
         configs: List[Dict[str, Any]] = []
@@ -242,7 +265,8 @@ class GitHubBridge:
             for item in self.list_tree(f"{BRIDGE_TRANSCRIPT_ROOT}/{group_name}"):
                 if item.get("type") != "file" or str(item.get("name") or "") != "transcript.json":
                     continue
-                data, _sha = self.read_bytes(str(item.get("path")))
+                source_path = str(item.get("path"))
+                data, _sha = self.read_bytes(source_path)
                 if not data:
                     continue
                 payload = json.loads(data.decode("utf-8"))
@@ -251,11 +275,12 @@ class GitHubBridge:
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
                 group_id = str(payload.get("group_id") or "").strip() if isinstance(payload, dict) else ""
+                latest_transcript_at = self.latest_write_at(source_path)
                 mapping: Dict[str, str] = {}
                 for config in configs:
                     mapping.update(_participant_ai_map(config, group_id))
                 ai_ids = [mapping.get(re.sub(r"\s+", " ", name).casefold(), "") for name in participants]
-                documents.append((str(item.get("path")), entries, participants, group_id, ai_ids))
+                documents.append((source_path, entries, participants, group_id, ai_ids, latest_transcript_at))
         return documents
 
 NON_PERSON_SUBJECTS = {
@@ -290,6 +315,20 @@ def now_iso() -> str:
 
 def now_human() -> str:
     return _dt.datetime.now().strftime("%Y-%m-%d at %H:%M")
+
+
+def _parse_timestamp(value: Any) -> float:
+    """Return an epoch timestamp for an ISO-8601 bridge value, or zero when unknown."""
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def extract_json(text: str) -> Dict[str, Any]:
@@ -1494,7 +1533,7 @@ class ProcessingWorker(QObject):
         self.stop()
 
     def poll_github_transcripts(self) -> None:
-        for source, entries, participants, group_id, ai_ids in self.bridge.transcript_documents():
+        for source, entries, participants, group_id, ai_ids, latest_transcript_at in self.bridge.transcript_documents():
             self.remote_participants[source] = participants
             self.remote_group_ids[source] = group_id
             self.remote_ai_ids[source] = ai_ids
@@ -1504,8 +1543,26 @@ class ProcessingWorker(QObject):
             new_entries = entries[old_count:]
             self.remote_entry_counts[source] = len(entries)
             if new_entries:
-                self.last_incoming_transcript_at[source] = time.time()
+                # This is the age of the conversation, not the age of our fetch. A backlog
+                # discovered after the manager was offline must still be stored, but must not
+                # look like a live conversation merely because GitHub returned it just now.
+                self.last_incoming_transcript_at[source] = latest_transcript_at
                 text = "\n".join(new_entries)
+                session: Dict[str, Any] = {
+                    "group_id": group_id, "names": participants, "ai_list": ai_ids,
+                }
+                # Run the latency-sensitive context mode at detection time, before this text
+                # even enters the slower extraction buffer. Both lookups therefore see only
+                # memories that predate the newly detected transcript entries.
+                self.send_memory_helpers(source, text, session, last_incoming_at=latest_transcript_at)
+                try:
+                    self.send_situation_recap(
+                        source, session, last_incoming_at=latest_transcript_at,
+                    )
+                except Exception as recap_error:
+                    self.error.emit(
+                        f"Situation recap failed; transcript will still be buffered for memory extraction: {recap_error}"
+                    )
                 self.buffer.add(source, text)
                 participant_text = ", ".join(participants) or "none listed"
                 self.log.emit(
@@ -1517,17 +1574,6 @@ class ProcessingWorker(QObject):
         ollama_url = self.settings.get('ollama_url')
         if time.time() < self.next_ollama_retry:
             return
-        if not _ollama_api_available(ollama_url):
-            started, detail = _start_local_ollama(ollama_url)
-            if not started:
-                self.next_ollama_retry = time.time() + 30
-                self.error.emit(
-                    f"Ollama is unavailable; buffered transcript retained and retry scheduled in 30 seconds: {detail}"
-                )
-                self.status.emit('Waiting for Ollama')
-                return
-            self.log.emit(detail)
-        self.next_ollama_retry = 0.0
         chunk, consumed = self.buffer.pop_chunk()
         if not chunk.strip(): return
         source = ", ".join(consumed)
@@ -1545,13 +1591,18 @@ class ProcessingWorker(QObject):
             self.log.emit(f"Skipped memory extraction for {source}: transcript.json contains no participants.")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
             return
-        group_id = next((self.remote_group_ids.get(consumed_source, "") for consumed_source in consumed if self.remote_group_ids.get(consumed_source, "")), "")
-        ai_list = next((self.remote_ai_ids.get(consumed_source, []) for consumed_source in consumed), [])
-        session: Dict[str, Any] = {"group_id": group_id, "names": group_people, "ai_list": ai_list}
-        last_incoming_at = max(
-            (self.last_incoming_transcript_at.get(consumed_source, 0.0) for consumed_source in consumed),
-            default=0.0,
-        )
+        if not _ollama_api_available(ollama_url):
+            started, detail = _start_local_ollama(ollama_url)
+            if not started:
+                self.buffer.add(source, chunk)
+                self.next_ollama_retry = time.time() + 30
+                self.error.emit(
+                    f"Ollama is unavailable; buffered transcript retained and retry scheduled in 30 seconds: {detail}"
+                )
+                self.status.emit('Waiting for Ollama')
+                return
+            self.log.emit(detail)
+        self.next_ollama_retry = 0.0
         client = OllamaClient(ollama_url, self.settings.get('ollama_model'))
         extractor = MemoryExtractor(self.settings.float('confidence_threshold'))
         prompt = extractor.prompt(chunk, group_people); self.output.emit('Prompt Sent', prompt); self.status.emit('Processing')
@@ -1563,13 +1614,6 @@ class ProcessingWorker(QObject):
             for job in jobs:
                 self.clean_job(job)
             self.log.emit(f"Stored and cleaned chunk from {source}; memories={len(memories)}; cleanup_jobs={len(jobs)}")
-            self.send_memory_helpers(source, chunk, session, last_incoming_at=last_incoming_at)
-            try:
-                self.send_situation_recap(source, session, client)
-            except Exception as recap_error:
-
-
-                self.error.emit(f"Situation recap failed; stored memories were preserved: {recap_error}")
             self.refreshed.emit(); self.status.emit('Monitoring GitHub')
         except Exception as e:
             self.buffer.add(source, chunk)
@@ -1678,10 +1722,19 @@ class ProcessingWorker(QObject):
 
     def send_situation_recap(
         self, source: str, session: Dict[str, Any], client: OllamaClient | None = None,
+        last_incoming_at: float = 0.0,
     ) -> None:
 
         if self.settings.get('situation_recaps_enabled').strip().lower() in {"0", "false", "no", "off"}:
             self.log.emit("Situation recap skipped: disabled by settings.")
+            return
+        activity_age = time.time() - last_incoming_at
+        if last_incoming_at <= 0 or activity_age > MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS:
+            age_detail = f"{activity_age:.0f} seconds ago" if last_incoming_at > 0 else "unknown"
+            self.log.emit(
+                "Situation recap skipped: no incoming transcript activity within the last "
+                f"5 minutes (latest transcript: {age_detail}). Memory extraction and storage continue normally."
+            )
             return
         group_id = str(session.get("group_id", "")).strip()
         participants = [str(name).strip() for name in session.get("names", []) if str(name).strip()]
