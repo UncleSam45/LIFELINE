@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.4
+// @version      1.2.8
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -33,7 +33,7 @@
   let autoCapture = true;
   let lastUrl = location.href;
   let ui = null;
-  let transcriptPanelAttemptedForCall = '';
+  let transcriptPanelActivatedForCall = '';
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -185,12 +185,31 @@
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
-  function clickElement(element) { element.click(); }
+  function clickElement(element) {
+    element.focus({ preventScroll: true });
+    HTMLElement.prototype.click.call(element);
+  }
+
+  function pressEnter(element) {
+    element.focus({ preventScroll: true });
+    element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+  }
+
+  async function waitFor(find, attempts = 16, delay = 150) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const result = find();
+      if (result) return result;
+      await sleep(attempt ? delay : 350);
+    }
+    return null;
+  }
 
   function isThreeDots(button) {
     if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+    if (/^Call menu$/i.test(normalizeText(button.getAttribute('aria-label')))) return true;
     const popupType = button.getAttribute('aria-haspopup');
-    if (popupType !== 'listbox' && popupType !== 'menu' && popupType !== 'true') return false;
+    if (!['dialog', 'listbox', 'menu', 'true'].includes(popupType)) return false;
     const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
     if (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5')) return true;
     const dots = [...(button.querySelector("svg[viewBox='0 0 24 24']")?.querySelectorAll('circle') || [])]
@@ -199,6 +218,9 @@
   }
 
   function findTranscriptOption() {
+    const currentRow = [...document.querySelectorAll("button[class*='call-dock-v2_menu-row__']")]
+      .find((option) => visible(option) && /^Transcript$/i.test(textOf(option)));
+    if (currentRow) return currentRow;
     const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
@@ -212,15 +234,31 @@
     const rowSelectors = ['[class*="call-transcript-panel-v2_row__"]', '[class*="call-transcript-panel_row__"]', '[class*="transcript"][class*="row"]'];
     let rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
     const callId = groupId();
-    if (!rows.length && transcriptPanelAttemptedForCall !== callId) {
-      transcriptPanelAttemptedForCall = callId;
-      const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
-      const button = menuButtons[0];
+    if (!rows.length && transcriptPanelActivatedForCall !== callId) {
+      const currentMenuButton = [...document.querySelectorAll('button[aria-label]')]
+        .find((button) => visible(button) && /^Call menu$/i.test(normalizeText(button.getAttribute('aria-label'))));
+      const button = currentMenuButton || [...document.querySelectorAll('button[type="button"]')]
+        .find((candidate) => visible(candidate) && isThreeDots(candidate));
       if (button) {
         clickElement(button);
-        let option = null;
-        for (let attempt = 0; attempt < 16 && !option; attempt += 1) { await sleep(attempt ? 150 : 350); option = findTranscriptOption(); }
-        if (option) { clickElement(option); await sleep(900); }
+        let option = await waitFor(findTranscriptOption);
+        if (!option) {
+          // Some Kindroid builds wire this accessible dialog trigger through its
+          // keyboard handler rather than accepting an untrusted pointer event.
+          pressEnter(button);
+          option = await waitFor(findTranscriptOption, 10);
+        }
+        if (option && option.getAttribute('aria-pressed') !== 'true') {
+          clickElement(option);
+          const activated = await waitFor(() => option.getAttribute('aria-pressed') === 'true'
+            || document.querySelector('[class*="call-transcript-panel"]'), 10);
+          if (!activated && option.isConnected) pressEnter(option);
+          await sleep(900);
+        }
+        // Finding the exact Transcript control proves that the call menu was
+        // activated. Do not toggle that menu on every capture while an empty or
+        // not-yet-populated transcript panel is waiting for its first row.
+        if (option) transcriptPanelActivatedForCall = callId;
       }
     }
     if (!rows.length) {
@@ -247,6 +285,7 @@
     const token = ui.token.value.trim();
     if (!id) { setStatus('Open a Kindroid group call to capture its transcript.', 'error'); return false; }
     if (!token) { setStatus('Enter a fine-grained GitHub token first.', 'error'); ui.token.focus(); return false; }
+    if (ui.remember.checked) GM_setValue(TOKEN_KEY, token);
     busy = true; ui.capture.disabled = true; setStatus('Opening transcript panel…');
     try {
       const bubbles = await extractTranscript();
@@ -282,7 +321,7 @@
       capture: shadow.querySelector('.capture'), status: shadow.querySelector('.status'),
     };
     const saved = GM_getValue(TOKEN_KEY, '');
-    ui.token.value = saved; ui.remember.checked = Boolean(saved);
+    ui.token.value = saved; ui.remember.checked = true;
     shadow.querySelector('.min').addEventListener('click', (event) => { ui.body.classList.toggle('hidden'); event.currentTarget.textContent = ui.body.classList.contains('hidden') ? '+' : '−'; });
     ui.capture.addEventListener('click', async () => { await capture(); schedule(CAPTURE_INTERVAL_MS); });
     ui.token.addEventListener('change', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); schedule(500); });
@@ -296,6 +335,7 @@
   setInterval(() => {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
+    transcriptPanelActivatedForCall = '';
     setStatus(groupId() ? 'Group call changed. Preparing automatic capture…' : 'Open a Kindroid group call to capture its transcript.', groupId() ? '' : 'error');
     schedule(1000);
   }, 1000);

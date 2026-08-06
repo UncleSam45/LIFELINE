@@ -353,12 +353,25 @@ async function extractCallTranscript(win) {
     };
     const unique = (elements) => [...new Set(elements.filter(Boolean))];
     const click = (element) => {
-      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-      element.click();
+      element.focus({ preventScroll: true });
+      HTMLElement.prototype.click.call(element);
+    };
+    const pressEnter = (element) => {
+      element.focus({ preventScroll: true });
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    };
+    const waitFor = async (find, attempts = 16, delay = 150) => {
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const result = find();
+        if (result) return result;
+        await sleep(attempt ? delay : 350);
+      }
+      return null;
     };
     const isThreeDots = (button) => {
       if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+      if (/^Call menu$/i.test(String(button.getAttribute('aria-label') || '').trim())) return true;
       const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
       if (button.getAttribute('aria-haspopup') === 'listbox' && (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5'))) return true;
       const svg = button.querySelector("svg[viewBox='0 0 24 24']");
@@ -377,6 +390,9 @@ async function extractCallTranscript(win) {
       return !iconPath || iconPath.trim() === TRANSCRIPT_ICON_PATH;
     };
     const findTranscriptOption = () => {
+      const currentRow = [...document.querySelectorAll("button[class*='call-dock-v2_menu-row__']")]
+        .find((option) => visible(option) && /^Transcript$/i.test(textOf(option)));
+      if (currentRow) return currentRow;
       const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
       const exact = candidates.find((option) => visible(option) && isTranscriptOption(option));
       if (exact) return exact;
@@ -385,18 +401,30 @@ async function extractCallTranscript(win) {
       return label?.closest?.("[role='option'], [role='menuitem'], button") || null;
     };
 
-    let opened = Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
+    const ACTIVATED_MARKER = 'lifelineTranscriptPanelActivated';
+    let opened = document.documentElement.dataset[ACTIVATED_MARKER] === 'true'
+      || Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
     if (!opened) {
-      const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
+      const currentMenuButton = [...document.querySelectorAll('button[aria-label]')]
+        .find((button) => visible(button) && /^Call menu$/i.test(String(button.getAttribute('aria-label') || '').trim()));
+      const menuButtons = currentMenuButton ? [currentMenuButton] : [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
       for (const menuButton of menuButtons) {
         click(menuButton);
-        let option = null;
-        for (let attempt = 0; attempt < 16 && !option; attempt += 1) {
-          await sleep(attempt ? 150 : 350);
-          option = findTranscriptOption();
+        let option = await waitFor(findTranscriptOption);
+        if (!option) {
+          pressEnter(menuButton);
+          option = await waitFor(findTranscriptOption, 10);
         }
         if (!option) continue;
-        click(option);
+        if (option.getAttribute('aria-pressed') !== 'true') {
+          click(option);
+          const activated = await waitFor(() => option.getAttribute('aria-pressed') === 'true'
+            || document.querySelector('[class*="call-transcript-panel"]'), 10);
+          if (!activated && option.isConnected) pressEnter(option);
+        }
+        // Persist activation in this page document so automatic capture does
+        // not repeatedly toggle the three-dot menu while the panel has no rows.
+        document.documentElement.dataset[ACTIVATED_MARKER] = 'true';
         await sleep(900);
         opened = true;
         break;
