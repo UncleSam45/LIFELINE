@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.4
+// @version      1.2.6
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -33,7 +33,6 @@
   let autoCapture = true;
   let lastUrl = location.href;
   let ui = null;
-  let transcriptPanelAttemptedForCall = '';
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -185,12 +184,22 @@
     throw new Error('Could not save the transcript after refreshing its GitHub revision.');
   }
 
-  function clickElement(element) { element.click(); }
+  function clickElement(element) {
+    element.focus({ preventScroll: true });
+    if (typeof PointerEvent === 'function') {
+      element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+      element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    }
+    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    element.click();
+  }
 
   function isThreeDots(button) {
     if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+    if (/^Call menu$/i.test(normalizeText(button.getAttribute('aria-label')))) return true;
     const popupType = button.getAttribute('aria-haspopup');
-    if (popupType !== 'listbox' && popupType !== 'menu' && popupType !== 'true') return false;
+    if (!['dialog', 'listbox', 'menu', 'true'].includes(popupType)) return false;
     const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
     if (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5')) return true;
     const dots = [...(button.querySelector("svg[viewBox='0 0 24 24']")?.querySelectorAll('circle') || [])]
@@ -199,6 +208,9 @@
   }
 
   function findTranscriptOption() {
+    const currentRow = [...document.querySelectorAll("button[class*='call-dock-v2_menu-row__']")]
+      .find((option) => visible(option) && /^Transcript$/i.test(textOf(option)));
+    if (currentRow) return currentRow;
     const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
     return candidates.find((option) => {
       if (!visible(option) || !/^Transcript$/i.test(textOf(option.querySelector('p.chakra-text') || option))) return false;
@@ -211,16 +223,16 @@
   async function extractTranscript() {
     const rowSelectors = ['[class*="call-transcript-panel-v2_row__"]', '[class*="call-transcript-panel_row__"]', '[class*="transcript"][class*="row"]'];
     let rows = [...new Set(rowSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
-    const callId = groupId();
-    if (!rows.length && transcriptPanelAttemptedForCall !== callId) {
-      transcriptPanelAttemptedForCall = callId;
-      const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
-      const button = menuButtons[0];
+    if (!rows.length) {
+      const currentMenuButton = [...document.querySelectorAll('button[aria-label]')]
+        .find((button) => visible(button) && /^Call menu$/i.test(normalizeText(button.getAttribute('aria-label'))));
+      const button = currentMenuButton || [...document.querySelectorAll('button[type="button"]')]
+        .find((candidate) => visible(candidate) && isThreeDots(candidate));
       if (button) {
         clickElement(button);
         let option = null;
         for (let attempt = 0; attempt < 16 && !option; attempt += 1) { await sleep(attempt ? 150 : 350); option = findTranscriptOption(); }
-        if (option) { clickElement(option); await sleep(900); }
+        if (option && option.getAttribute('aria-pressed') !== 'true') { clickElement(option); await sleep(900); }
       }
     }
     if (!rows.length) {
@@ -247,6 +259,7 @@
     const token = ui.token.value.trim();
     if (!id) { setStatus('Open a Kindroid group call to capture its transcript.', 'error'); return false; }
     if (!token) { setStatus('Enter a fine-grained GitHub token first.', 'error'); ui.token.focus(); return false; }
+    if (ui.remember.checked) GM_setValue(TOKEN_KEY, token);
     busy = true; ui.capture.disabled = true; setStatus('Opening transcript panel…');
     try {
       const bubbles = await extractTranscript();
@@ -282,9 +295,10 @@
       capture: shadow.querySelector('.capture'), status: shadow.querySelector('.status'),
     };
     const saved = GM_getValue(TOKEN_KEY, '');
-    ui.token.value = saved; ui.remember.checked = Boolean(saved);
+    ui.token.value = saved; ui.remember.checked = true;
     shadow.querySelector('.min').addEventListener('click', (event) => { ui.body.classList.toggle('hidden'); event.currentTarget.textContent = ui.body.classList.contains('hidden') ? '+' : '−'; });
     ui.capture.addEventListener('click', async () => { await capture(); schedule(CAPTURE_INTERVAL_MS); });
+    ui.token.addEventListener('input', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); });
     ui.token.addEventListener('change', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); schedule(500); });
     ui.remember.addEventListener('change', () => { if (ui.remember.checked && ui.token.value.trim()) GM_setValue(TOKEN_KEY, ui.token.value.trim()); else GM_deleteValue(TOKEN_KEY); });
     shadow.querySelector('.forget').addEventListener('click', () => { GM_deleteValue(TOKEN_KEY); ui.token.value = ''; ui.remember.checked = false; clearTimeout(timer); setStatus('Token removed from Tampermonkey storage.'); });
