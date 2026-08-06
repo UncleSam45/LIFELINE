@@ -359,6 +359,7 @@ async function extractCallTranscript(win) {
     };
     const isThreeDots = (button) => {
       if (button?.tagName?.toLowerCase() !== 'button' || button.getAttribute('type') !== 'button') return false;
+      if (/^Call menu$/i.test(String(button.getAttribute('aria-label') || '').trim())) return true;
       const legacyPath = button.querySelector("svg[viewBox='0 0 16 16'] path")?.getAttribute('d') || '';
       if (button.getAttribute('aria-haspopup') === 'listbox' && (legacyPath === THREE_DOT_PATH || legacyPath.includes('M3 9.5a1.5'))) return true;
       const svg = button.querySelector("svg[viewBox='0 0 24 24']");
@@ -377,7 +378,7 @@ async function extractCallTranscript(win) {
       return !iconPath || iconPath.trim() === TRANSCRIPT_ICON_PATH;
     };
     const findTranscriptOption = () => {
-      const candidates = [...document.querySelectorAll("[role='option'], [role='menuitem'], button")];
+      const candidates = [...document.querySelectorAll("button[class*='call-dock-v2_menu-row__'], [role='option'], [role='menuitem'], button")];
       const exact = candidates.find((option) => visible(option) && isTranscriptOption(option));
       if (exact) return exact;
       const label = [...document.querySelectorAll("[role='option'] p, [role='menuitem'] p, button p, [role='option'], [role='menuitem'], button")]
@@ -387,7 +388,7 @@ async function extractCallTranscript(win) {
 
     let opened = Boolean(document.querySelector('[class*="call-transcript-panel-v2_row__"], [class*="call-transcript-panel_row__"]'));
     if (!opened) {
-      const menuButtons = [...document.querySelectorAll('button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
+      const menuButtons = [...document.querySelectorAll('button[aria-label="Call menu"], button[type="button"]')].filter((button) => visible(button) && isThreeDots(button));
       for (const menuButton of menuButtons) {
         click(menuButton);
         let option = null;
@@ -396,7 +397,7 @@ async function extractCallTranscript(win) {
           option = findTranscriptOption();
         }
         if (!option) continue;
-        click(option);
+        if (option.getAttribute('aria-pressed') !== 'true') click(option);
         await sleep(900);
         opened = true;
         break;
