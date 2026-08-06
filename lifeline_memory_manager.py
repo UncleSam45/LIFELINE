@@ -216,6 +216,29 @@ class GitHubBridge:
         payload = response.json()
         return payload if isinstance(payload, list) else []
 
+    def latest_write_at(self, path: str) -> float:
+        """Return GitHub's timestamp for the most recent commit that wrote ``path``."""
+        if not self.enabled:
+            return 0.0
+        response = requests.get(
+            f"https://api.github.com/repos/{BRIDGE_OWNER}/{BRIDGE_REPO}/commits",
+            headers=self._headers(),
+            params={"path": path.strip("/"), "sha": BRIDGE_BRANCH, "per_page": 1},
+            timeout=30,
+        )
+        if response.status_code == 404:
+            return 0.0
+        response.raise_for_status()
+        commits = response.json()
+        if not isinstance(commits, list) or not commits or not isinstance(commits[0], dict):
+            return 0.0
+        commit = commits[0].get("commit")
+        if not isinstance(commit, dict):
+            return 0.0
+        committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
+        author = commit.get("author") if isinstance(commit.get("author"), dict) else {}
+        return _parse_timestamp(committer.get("date") or author.get("date"))
+
     def validate_access(self) -> None:
 
         response = requests.get(
@@ -242,7 +265,8 @@ class GitHubBridge:
             for item in self.list_tree(f"{BRIDGE_TRANSCRIPT_ROOT}/{group_name}"):
                 if item.get("type") != "file" or str(item.get("name") or "") != "transcript.json":
                     continue
-                data, _sha = self.read_bytes(str(item.get("path")))
+                source_path = str(item.get("path"))
+                data, _sha = self.read_bytes(source_path)
                 if not data:
                     continue
                 payload = json.loads(data.decode("utf-8"))
@@ -251,14 +275,12 @@ class GitHubBridge:
                 raw_participants = payload.get("participants", []) if isinstance(payload, dict) else []
                 participants = list(dict.fromkeys(str(name).strip() for name in raw_participants if str(name).strip()))
                 group_id = str(payload.get("group_id") or "").strip() if isinstance(payload, dict) else ""
-                latest_transcript_at = _parse_timestamp(
-                    payload.get("latest_transcript_at") if isinstance(payload, dict) else None
-                )
+                latest_transcript_at = self.latest_write_at(source_path)
                 mapping: Dict[str, str] = {}
                 for config in configs:
                     mapping.update(_participant_ai_map(config, group_id))
                 ai_ids = [mapping.get(re.sub(r"\s+", " ", name).casefold(), "") for name in participants]
-                documents.append((str(item.get("path")), entries, participants, group_id, ai_ids, latest_transcript_at))
+                documents.append((source_path, entries, participants, group_id, ai_ids, latest_transcript_at))
         return documents
 
 NON_PERSON_SUBJECTS = {

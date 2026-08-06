@@ -19,6 +19,31 @@ from lifeline_memory_manager import (
 
 
 class BridgeBackupTests(unittest.TestCase):
+    @patch("lifeline_memory_manager.requests.get")
+    def test_latest_write_time_comes_from_github_commit_history(self, get) -> None:
+        response = get.return_value
+        response.status_code = 200
+        response.json.return_value = [{
+            "commit": {"committer": {"date": "2026-08-06T12:34:56Z"}},
+        }]
+        bridge = GitHubBridge("token")
+
+        written_at = bridge.latest_write_at("transcripts/group/transcript.json")
+
+        self.assertEqual(written_at, dt.datetime(2026, 8, 6, 12, 34, 56, tzinfo=dt.timezone.utc).timestamp())
+        get.assert_called_once()
+        request_args, request_kwargs = get.call_args
+        self.assertTrue(request_args[0].endswith("/commits"))
+        self.assertEqual(request_kwargs["params"]["path"], "transcripts/group/transcript.json")
+        self.assertEqual(request_kwargs["params"]["per_page"], 1)
+
+    @patch("lifeline_memory_manager.requests.get")
+    def test_latest_write_time_is_unknown_when_github_has_no_history(self, get) -> None:
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = []
+
+        self.assertEqual(GitHubBridge("token").latest_write_at("transcripts/group/transcript.json"), 0.0)
+
     @patch.object(GitHubBridge, "read_bytes")
     @patch.object(GitHubBridge, "write_bytes", return_value="ab1891c9f4b427ab75fb1123c6dc24e211ca4885")
     def test_bridge_upload_uses_accepted_blob_sha_without_stale_readback(self, write_bytes, read_bytes) -> None:
