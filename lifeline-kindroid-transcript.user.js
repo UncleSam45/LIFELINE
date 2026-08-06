@@ -155,6 +155,9 @@
       group_id: id,
       participants: configuredParticipants.length ? [...new Set(configuredParticipants)] : (preservedParticipants.length ? preservedParticipants : detectedParticipants),
       transcript: prior.concat(appended),
+      // The manager uses transcript age—not fetch age—to decide whether context messages
+      // belong to an ongoing conversation. Preserve the prior time on metadata-only writes.
+      latest_transcript_at: appended.length ? new Date().toISOString() : (base.latest_transcript_at || null),
     };
     return { doc, added: appended.length, changed: JSON.stringify(base) !== JSON.stringify(doc) };
   }

@@ -80,6 +80,35 @@ class WorkerTestCase(unittest.TestCase):
 
 
 class MemoryHelperActivityTests(WorkerTestCase):
+    def test_poll_delivers_context_before_buffering_for_extraction(self) -> None:
+        worker = self.make_worker()
+        worker.bridge = Mock()
+        captured_at = time.time()
+        worker.bridge.transcript_documents.return_value = [(
+            "transcripts/group/transcript.json", ["Kin: launch"], ["Kin"],
+            "group", ["ai-kin"], captured_at,
+        )]
+        worker.remote_participants = {}
+        worker.remote_group_ids = {}
+        worker.remote_ai_ids = {}
+        worker.remote_entry_counts = {}
+        worker.last_incoming_transcript_at = {}
+        worker.buffer = Mock()
+        calls = []
+        worker.send_memory_helpers = Mock(side_effect=lambda *_args, **_kwargs: calls.append("helpers"))
+        worker.send_situation_recap = Mock(side_effect=lambda *_args, **_kwargs: calls.append("recap"))
+        worker.buffer.add.side_effect = lambda *_args: calls.append("buffer")
+
+        worker.poll_github_transcripts()
+
+        self.assertEqual(calls, ["helpers", "recap", "buffer"])
+        self.assertEqual(worker.last_incoming_transcript_at["transcripts/group/transcript.json"], captured_at)
+        worker.send_memory_helpers.assert_called_once_with(
+            "transcripts/group/transcript.json", "Kin: launch",
+            {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-kin"]},
+            last_incoming_at=captured_at,
+        )
+
     def test_stale_transcript_does_not_check_or_send_helpers(self) -> None:
         worker = self.make_worker()
         worker.send_memory_helpers(
@@ -156,6 +185,7 @@ class SituationRecapTests(WorkerTestCase):
         worker.send_situation_recap(
             "transcripts/group/transcript.json",
             {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-1"]}, client,
+            last_incoming_at=time.time(),
         )
         client.generate.assert_not_called()
         worker.db.updated_keyword_memories.assert_not_called()
@@ -174,13 +204,30 @@ class SituationRecapTests(WorkerTestCase):
         client.generate.return_value = ('{"recap":"Kin launched it."}', {"recap": "Kin launched it."})
         session = {"group_id": "group", "names": ["Kin", "Nova"], "ai_list": ["ai-1", "ai-2"]}
 
-        worker.send_situation_recap("transcripts/group/transcript.json", session, client)
+        worker.send_situation_recap(
+            "transcripts/group/transcript.json", session, client, last_incoming_at=time.time()
+        )
 
         client.generate.assert_called_once()
         self.assertIn("separate recap task", client.generate.call_args.args[0])
         group_send.assert_called_once_with("group", "SITUATION RECAP", "Kin launched it.")
         self.assertEqual(direct_send.call_count, 2)
         worker.db.complete_situation_recap.assert_called_once_with(42, "Kin launched it.", True, 2)
+
+    def test_stale_transcript_does_not_generate_recap(self) -> None:
+        worker = self.make_worker()
+        client = Mock()
+
+        worker.send_situation_recap(
+            "transcripts/group/transcript.json",
+            {"group_id": "group", "names": ["Kin"], "ai_list": ["ai-1"]},
+            client,
+            last_incoming_at=time.time() - MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS - 1,
+        )
+
+        worker.db.situation_recap_due.assert_not_called()
+        client.generate.assert_not_called()
+        self.assertIn("no incoming transcript activity", worker.log.emit.call_args.args[0])
 
     def test_prompt_rejects_invention_and_database_language(self) -> None:
         prompt = SituationRecapComposer.prompt([{
