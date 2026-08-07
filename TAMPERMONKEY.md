@@ -24,6 +24,23 @@ The green **SPEAKER MONITOR** control at the bottom left is enabled by default a
 
 For Tampermonkey, create a new script and paste the complete contents of `lifeline-kindroid-call-toolkit.user.js`, or install that raw file directly. It has no external `@require`; the metadata and complete implementation live in the same valid userscript file.
 
+## Automatic call start
+
+`lifeline-kindroid-auto-call.user.js` is a separate, minimal Tampermonkey
+userscript that automatically presses **Start call** whenever Kindroid renders
+the call-preview button. Install it by creating a new Tampermonkey script,
+replacing the template with the complete file, and saving it. It runs on both
+the `kindroid.ai` and `www.kindroid.ai` hosts and supports client-side navigation.
+
+The script deliberately identifies the button by its stable
+`aria-label="Start call"` rather than depending on the generated CSS-module
+suffix (such as `__lMp93`), which Kindroid can change during a deployment. A DOM
+observer reacts to delayed page rendering, while a slow polling fallback covers
+unusual in-place state changes. A particular enabled button is retried only
+after five seconds, so a missed click can recover without rapid duplicate
+clicks. If the browser asks for microphone permission, grant it for Kindroid;
+Tampermonkey cannot bypass browser media-permission prompts.
+
 ## Transcript bridge
 
 `lifeline-kindroid-transcript.user.js` brings the Electron group-call transcript bridge to normal browsers through Tampermonkey.
