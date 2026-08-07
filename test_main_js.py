@@ -293,6 +293,17 @@ def test_frontend_state_is_local_first_and_github_writes_complete_snapshots():
     assert "Saved ${entries().length} entries to ${BRIDGE_PATH}" not in MAIN_JS
 
 
+def test_groupmaker_transcript_conflicts_are_retried_without_failing_created_group():
+    transcript_setup = MAIN_JS.split("async function ensureGroupTranscript", 1)[1].split("async function readGithubContentFile", 1)[0]
+    assert "attempt >= 3" in transcript_setup
+    assert "'Cache-Control': 'no-cache'" in transcript_setup
+    assert "fresh=${Date.now()}-${attempt}" in transcript_setup
+    groupmaker_sync = MAIN_JS.split("async function syncGroupmaker", 1)[1].split("async function fetchTranscriptPage", 1)[0]
+    assert "let transcriptWarning = ''" in groupmaker_sync
+    assert "Transcript metadata will be repaired on the next sync" in groupmaker_sync
+    assert "const opened = openCall" in groupmaker_sync
+
+
 def test_directory_edits_auto_save_before_or_after_navigation():
     assert "function scheduleDirectoryAutoSave(person, delay = 700)" in MAIN_JS
     assert "queueBridgeSave(`Auto-save Directory person:" in MAIN_JS

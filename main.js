@@ -1092,7 +1092,7 @@ async function githubRequest(url, options = {}) {
   return payload;
 }
 
-async function ensureGroupTranscript(groupId, participants, retryOnConflict = true) {
+async function ensureGroupTranscript(groupId, participants, attempt = 0) {
   const id = String(groupId || '').trim();
   const names = [...new Set((Array.isArray(participants) ? participants : []).map((name) => String(name || '').trim()).filter(Boolean))];
   if (!id || !names.length) return;
@@ -1100,7 +1100,10 @@ async function ensureGroupTranscript(groupId, participants, retryOnConflict = tr
   let sha = '';
   let current = null;
   try {
-    const file = await githubRequest(bridgeUrl(path));
+    const separator = bridgeUrl(path).includes('?') ? '&' : '?';
+    const file = await githubRequest(`${bridgeUrl(path)}${separator}fresh=${Date.now()}-${attempt}`, {
+      headers: { 'Cache-Control': 'no-cache' },
+    });
     sha = String(file.sha || '');
     current = decodeBase64(file.content || '');
   } catch (error) {
@@ -1121,8 +1124,9 @@ async function ensureGroupTranscript(groupId, participants, retryOnConflict = tr
       }),
     });
   } catch (error) {
-    if (!retryOnConflict || !isGithubShaMismatch(error)) throw error;
-    await ensureGroupTranscript(id, names, false);
+    if (attempt >= 3 || !isGithubShaMismatch(error)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    await ensureGroupTranscript(id, names, attempt + 1);
   }
 }
 
@@ -2070,9 +2074,17 @@ async function syncGroupmaker({ automatic = false, openCall = true } = {}) {
     state.groupmakerStatus = `Preparing transcript metadata for ${sessionNames.join(', ')} before opening the call…`;
     render();
     await saveBridge(`GROUPMAKER ${active ? 'update' : 'create'} session`, true);
-    await ensureGroupTranscript(target.group_id, sessionNames);
+    let transcriptWarning = '';
+    try {
+      await ensureGroupTranscript(target.group_id, sessionNames);
+    } catch (error) {
+      // The Kindroid group and local session already exist at this point. Transcript
+      // metadata is repairable, so a stale GitHub revision must not turn a successful
+      // group creation into a UI failure or prevent the user from entering the call.
+      transcriptWarning = ` Transcript metadata will be repaired on the next sync (${error.message}).`;
+    }
     const opened = openCall && openPreparedGroupmakerTab(preparedTab, target.group_id);
-    const callStatus = !openCall ? 'Auto mode completed without opening a call tab.' : opened ? 'Opened Kindroid call tab after preparing its transcript.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`;
+    const callStatus = (!openCall ? 'Auto mode completed without opening a call tab.' : opened ? 'Opened Kindroid call tab after preparing its transcript.' : `Open manually: ${kindroidGroupCallUrl(target.group_id)}`) + transcriptWarning;
     state.groupmakerStatus = active && !configurationChanged && !automationChanged
       ? callStatus
       : `${automatic ? 'Auto mode: ' : ''}${active ? 'Updated active session' : `Created active session ${target.group_id}`} (${result.status}). Automation: ${automation.scenesUpdated}/${people.length} participant scene(s) updated; ${automation.groupSent ? 'group recap sent' : 'no group recap'}; ${automation.directSent} location notice(s) sent${automation.errors.length ? `; ${automation.errors.length} warning(s)` : ''}. ${callStatus}`;
