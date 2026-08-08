@@ -71,6 +71,7 @@ const BRIDGE_BRANCH = 'main';
 const BRIDGE_PATH = 'config.json';
 const JOURNAL_BRIDGE_PATH = 'journal.json';
 const TOKEN_STORAGE_KEY = 'lifeline.bridge.accessKey';
+const SERVER_STORAGE_KEY = 'lifeline.bridge.server';
 const REMEMBER_STORAGE_KEY = 'lifeline.bridge.rememberAccessKey';
 const LOCAL_CONFIG_STORAGE_KEY = 'lifeline.local.config.snapshot';
 const KINDROID_API_KEY_STORAGE_KEY = 'lifeline.kindroid.apiKey';
@@ -84,6 +85,7 @@ const KINDROID_BASE_URL = 'https://api.kindroid.ai/v1';
 const GROUPMAKER_REQUESTER = 'LIFELINE-MAINJS-GROUPMAKER';
 const PHONE_CALL_DIRECTIVE = 'This is a phone call. Respond in direct speech only. Avoid action or inner thought narration. Keep it concise.';
 const REMEMBERED_ACCESS_KEY = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+const REMEMBERED_SERVER = localStorage.getItem(SERVER_STORAGE_KEY) || BRIDGE_REPO;
 const REMEMBERED_KINDROID_API_KEY = localStorage.getItem(KINDROID_API_KEY_STORAGE_KEY) || '';
 const REMEMBERED_WEATHER_API_KEY = localStorage.getItem(WEATHER_API_KEY_STORAGE_KEY) || '';
 const REMEMBERED_NEWS_API_KEY = localStorage.getItem(NEWS_API_KEY_STORAGE_KEY) || '';
@@ -151,6 +153,7 @@ const DEFAULT_ENTRY = {
 };
 
 const state = {
+  server: REMEMBERED_SERVER,
   accessKey: REMEMBERED_ACCESS_KEY,
   rememberKey: localStorage.getItem(REMEMBER_STORAGE_KEY) === 'true',
   authenticated: false,
@@ -1069,7 +1072,7 @@ async function updateFamilyMemory(entry) {
 function bridgeUrl(path = BRIDGE_PATH, includeRef = true) {
   const encodedPath = encodeURIComponent(path).replaceAll('%2F', '/');
   const refQuery = includeRef ? `?ref=${BRIDGE_BRANCH}` : '';
-  return `https://api.github.com/repos/${GITHUB_OWNER}/${BRIDGE_REPO}/contents/${encodedPath}${refQuery}`;
+  return `https://api.github.com/repos/${GITHUB_OWNER}/${encodeURIComponent(state.server || BRIDGE_REPO)}/contents/${encodedPath}${refQuery}`;
 }
 
 async function githubRequest(url, options = {}) {
@@ -1253,7 +1256,7 @@ function normalizeImported(payload) {
 }
 
 async function loadBridge() {
-  state.syncState = 'Syncing'; state.syncDetail = `Restoring directory from ${BRIDGE_REPO}/${BRIDGE_PATH}…`; render();
+  state.syncState = 'Syncing'; state.syncDetail = `Restoring directory from ${state.server}/${BRIDGE_PATH}…`; render();
   let selectedCandidate = null;
   let lastError = null;
   const localSnapshot = localConfigSnapshot();
@@ -1296,6 +1299,12 @@ async function loadBridge() {
     state.bridgeSha = '';
     state.authenticated = true;
     state.syncState = 'New bridge'; state.syncDetail = `${BRIDGE_PATH} will be created on first save.`;
+  }
+  if (state.authenticated && document.querySelector('#crowdnet-connection-logger')) {
+    const logger = document.querySelector('#crowdnet-connection-logger');
+    logger.classList.add('logger-connected');
+    logger.setAttribute('aria-label', 'Connection confirmed');
+    await new Promise((resolve) => setTimeout(resolve, 850));
   }
   render();
 }
@@ -1441,15 +1450,37 @@ function filteredEntries() {
 }
 
 function renderLogin() {
-  root.innerHTML = `<main class="login-shell"><section class="login-card"><div class="orb"></div><p class="eyebrow">LIFELINE</p><form id="login-form" class="access-form"><label>ACCESS KEY</label><input id="access-key" type="password" autocomplete="off" value="${escapeHtml(state.accessKey)}" placeholder="Access key" required /><label class="remember"><input id="remember-key" type="checkbox" ${state.rememberKey ? 'checked' : ''}/> Remember locally</label><button>Connect</button></form><p class="sync-note">${escapeHtml(state.syncState)} — ${escapeHtml(state.syncDetail)}</p></section></main>`;
-  document.querySelector('#login-form').addEventListener('submit', (event) => {
+  root.innerHTML = `<main class="login-shell"><section class="login-card"><div class="orb"></div><p class="eyebrow">LIFELINE</p><form id="login-form" class="access-form"><label for="server">SERVER</label><input id="server" name="server" type="text" autocomplete="off" value="${escapeHtml(state.server)}" placeholder="Server" required /><label for="access-key">ACCESS KEY</label><input id="access-key" name="accessKey" type="password" autocomplete="off" value="${escapeHtml(state.accessKey)}" placeholder="Access key" required /><label class="remember"><input id="remember-key" type="checkbox" ${state.rememberKey ? 'checked' : ''}/> Remember locally</label><button>Connect</button></form><p class="sync-note">${escapeHtml(state.syncState)} — ${escapeHtml(state.syncDetail)}</p></section></main>${connectionLoggerMarkup()}`;
+  const connect = (event) => {
     event.preventDefault();
-    state.accessKey = document.querySelector('#access-key').value.trim();
+    const source = event.currentTarget;
+    state.server = source.querySelector('[name="server"]').value.trim();
+    state.accessKey = source.querySelector('[name="accessKey"]').value.trim();
     state.rememberKey = document.querySelector('#remember-key').checked;
     localStorage.setItem(REMEMBER_STORAGE_KEY, String(state.rememberKey));
-    if (state.rememberKey) localStorage.setItem(TOKEN_STORAGE_KEY, state.accessKey); else localStorage.removeItem(TOKEN_STORAGE_KEY);
+    if (state.rememberKey) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, state.accessKey);
+      localStorage.setItem(SERVER_STORAGE_KEY, state.server);
+    } else {
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+      localStorage.removeItem(SERVER_STORAGE_KEY);
+    }
     loadBridge();
+  };
+  document.querySelector('#login-form').addEventListener('submit', connect);
+  document.querySelector('#crowdnet-login-form').addEventListener('submit', connect);
+  window.crowdnetLogger = Object.freeze({
+    element: document.querySelector('#crowdnet-connection-logger'),
+    update: ({ server, accessKey } = {}) => {
+      if (server !== undefined) document.querySelector('#logger-server').value = String(server ?? '');
+      if (accessKey !== undefined) document.querySelector('#logger-access-key').value = String(accessKey ?? '');
+    },
+    clear: () => { document.querySelector('#logger-server').value = ''; document.querySelector('#logger-access-key').value = ''; },
   });
+}
+
+function connectionLoggerMarkup() {
+  return `<aside id="crowdnet-connection-logger" aria-label="Connection logger"><div class="logger-shell"><div class="logger-scan"></div><header><div class="logger-title"><i class="logger-pulse"></i><h2>CONNECTION LOGGER</h2></div><span>LIVE FEED · 02</span></header><form id="crowdnet-login-form" class="logger-fields"><label>SERVER<div class="logger-value"><input id="logger-server" name="server" type="text" value="${escapeHtml(state.server)}" placeholder="AWAITING SERVER" autocomplete="off" spellcheck="false" required></div></label><label>ACCESS KEY<div class="logger-value"><input id="logger-access-key" name="accessKey" type="password" value="${escapeHtml(state.accessKey)}" placeholder="AWAITING KEY" autocomplete="off" spellcheck="false" required></div></label><button class="logger-submit" type="submit">CONNECT</button></form></div></aside>`;
 }
 
 function entryInitials(entry) {
@@ -1549,7 +1580,7 @@ function renderMemorySection(person) {
 
 function renderSettingsPanel() {
   if (!state.settingsOpen) return '';
-  return `<section class="settings-panel"><div><p class="eyebrow">SETTINGS</p><h3>Bridge settings</h3><p class="sync-note">Import a config.json file from one dedicated settings area.</p></div><button id="import" class="ghost" type="button">Import config.json</button><input id="file" type="file" accept="application/json,.json" hidden /><div class="github-session"><div><b>GitHub token</b><small>${state.rememberKey ? 'Saved on this device' : 'Used for this session only'}</small></div><div class="github-session-actions"><button id="change-github-token" class="ghost" type="button">Change token</button><button id="logout-github" class="danger" type="button">Log out</button></div></div></section>`;
+  return `<section class="settings-panel"><div><p class="eyebrow">SETTINGS</p><h3>Connection settings</h3><p class="sync-note">Import a config.json file from one dedicated settings area.</p></div><button id="import" class="ghost" type="button">Import config.json</button><input id="file" type="file" accept="application/json,.json" hidden /><div class="github-session"><div><b>Access key</b><small>${state.rememberKey ? 'Saved on this device' : 'Used for this session only'}</small></div><div class="github-session-actions"><button id="change-github-token" class="ghost" type="button">Change access key</button><button id="logout-github" class="danger" type="button">Log out</button></div></div></section>`;
 }
 
 function endGithubSession(detail) {
@@ -1559,6 +1590,8 @@ function endGithubSession(detail) {
   }
   localStorage.removeItem(TOKEN_STORAGE_KEY);
   localStorage.removeItem(REMEMBER_STORAGE_KEY);
+  localStorage.removeItem(SERVER_STORAGE_KEY);
+  state.server = BRIDGE_REPO;
   state.accessKey = '';
   state.rememberKey = false;
   state.authenticated = false;

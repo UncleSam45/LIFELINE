@@ -345,3 +345,18 @@ def test_wiki_displays_only_the_primary_keyword():
     assert "supportingKeywords.map" not in MAIN_JS
     assert "wiki-keyword-dominant" not in MAIN_JS
     assert "PRIMARY KEYWORD" in MAIN_JS
+
+
+def test_connection_logger_supports_server_and_access_key_login():
+    assert "const GITHUB_OWNER = 'unclesam45'" in MAIN_JS
+    assert 'id="crowdnet-connection-logger"' in MAIN_JS
+    assert 'id="crowdnet-login-form"' in MAIN_JS
+    assert 'name="server"' in MAIN_JS
+    assert 'name="accessKey"' in MAIN_JS
+    assert "source.querySelector('[name=\"server\"]')" in MAIN_JS
+    assert "source.querySelector('[name=\"accessKey\"]')" in MAIN_JS
+    assert "logger.classList.add('logger-connected')" in MAIN_JS
+    assert '@keyframes crowdnetLoggerConnected' in STYLES_CSS
+    login_markup = MAIN_JS.split('function renderLogin()', 1)[1].split('function connectionLoggerMarkup()', 1)[0]
+    assert 'GitHub' not in login_markup
+    assert 'fine grained' not in login_markup.lower()
