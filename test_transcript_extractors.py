@@ -43,3 +43,10 @@ def test_userscript_remembers_token_by_default_and_before_capture():
     assert "ui.token.value = saved; ui.remember.checked = true;" in USERSCRIPT
     capture = USERSCRIPT.split("async function capture()", 1)[1].split("function schedule", 1)[0]
     assert "GM_setValue(TOKEN_KEY, token)" in capture
+
+
+def test_userscript_fetches_large_github_files_through_the_git_blob_api():
+    assert "async function readGithubFileUtf8(token, file, action)" in USERSCRIPT
+    assert "file?.encoding === 'base64'" in USERSCRIPT
+    assert "url: file.git_url" in USERSCRIPT
+    assert "JSON.parse(await readGithubFileUtf8(token, file, 'Reading GROUPMAKER participant metadata'))" in USERSCRIPT
