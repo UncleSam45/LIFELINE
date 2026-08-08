@@ -215,6 +215,7 @@ const state = {
   groupmakerUseNames: true,
   groupmakerUseActivity: true,
   groupmakerAutoMode: false,
+  groupmakerSyncScenarioKey: '',
   activeEntryTab: 'profile',
   settingsOpen: false,
   kindroidPanelOpen: false,
@@ -376,6 +377,74 @@ function groupmakerSessions() {
   if (!Array.isArray(state.config.groupmaker_sessions)) state.config.groupmaker_sessions = [];
   state.config.groupmaker_sessions = state.config.groupmaker_sessions.filter((row) => row && typeof row === 'object');
   return state.config.groupmaker_sessions;
+}
+
+function groupmakerScenarios() {
+  if (!Array.isArray(state.config.groupmaker_scenarios)) state.config.groupmaker_scenarios = [];
+  state.config.groupmaker_scenarios = state.config.groupmaker_scenarios.filter((row) => row && typeof row === 'object');
+  return state.config.groupmaker_scenarios;
+}
+
+function activeGroupmakerScenario() {
+  const activeKey = String(state.config.groupmaker_active_scenario_key || '').trim();
+  return activeKey ? groupmakerScenarios().find((row) => String(row.scenario_key || '') === activeKey && !String(row.ended_at || '').trim()) || null : null;
+}
+
+function applyGroupmakerScenario(scenario) {
+  if (!scenario) return false;
+  state.groupmakerNames = String(scenario.names || '');
+  state.groupmakerLocation = String(scenario.location || '');
+  state.groupmakerActivity = String(scenario.activity || '');
+  state.groupmakerContext = String(scenario.context || '');
+  state.groupmakerUseNames = scenario.use_names !== false;
+  state.groupmakerUseActivity = scenario.use_activity !== false;
+  persistGroupmakerDraft();
+  return true;
+}
+
+async function saveCurrentGroupmakerScenario() {
+  const suggested = `Scenario ${localCalendarDate()}`;
+  const name = String(prompt('Name this GROUPMAKER scenario:', suggested) || '').trim();
+  if (!name) return;
+  const now = new Date().toISOString();
+  const scenario = {
+    scenario_key: `scenario_${Date.now()}_${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`,
+    name,
+    names: state.groupmakerNames,
+    location: state.groupmakerLocation,
+    activity: state.groupmakerActivity,
+    context: state.groupmakerContext,
+    use_names: state.groupmakerUseNames,
+    use_activity: state.groupmakerUseActivity,
+    created_at: now,
+    touched_at: now,
+    ended_at: '',
+  };
+  state.config.groupmaker_scenarios = groupmakerScenarios().concat(scenario);
+  state.config.groupmaker_active_scenario_key = scenario.scenario_key;
+  state.groupmakerSyncScenarioKey = scenario.scenario_key;
+  state.groupmakerStatus = `Saved “${name}” as the active scenario without updating the Kindroid group.`;
+  persistGroupmakerDraft();
+  await saveBridge('Save active GROUPMAKER scenario');
+}
+
+async function restoreGroupmakerScenario(scenarioKey) {
+  const scenario = groupmakerScenarios().find((row) => String(row.scenario_key || '') === String(scenarioKey || '') && !String(row.ended_at || '').trim());
+  if (!applyGroupmakerScenario(scenario)) return;
+  state.config.groupmaker_active_scenario_key = scenario.scenario_key;
+  state.groupmakerSyncScenarioKey = scenario.scenario_key;
+  state.groupmakerStatus = `Restored “${scenario.name || 'Unnamed scenario'}” into GROUPMAKER. The Kindroid group has not been updated.`;
+  await saveBridge('Restore active GROUPMAKER scenario');
+}
+
+async function endGroupmakerScenario(scenarioKey) {
+  const scenario = groupmakerScenarios().find((row) => String(row.scenario_key || '') === String(scenarioKey || ''));
+  if (!scenario) return;
+  scenario.ended_at = new Date().toISOString();
+  if (String(state.config.groupmaker_active_scenario_key || '') === String(scenario.scenario_key)) state.config.groupmaker_active_scenario_key = '';
+  if (state.groupmakerSyncScenarioKey === scenario.scenario_key) state.groupmakerSyncScenarioKey = '';
+  state.groupmakerStatus = `Ended “${scenario.name || 'Unnamed scenario'}”. Its saved history remains in the bridge.`;
+  await saveBridge('End GROUPMAKER scenario');
 }
 
 function localCalendarDate(date = new Date()) {
@@ -1902,9 +1971,14 @@ function renderGroupmakerWindow() {
   const transcriptStatus = state.groupmakerTranscriptStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerTranscriptStatus)}</p>` : '';
   const groupmakerStatus = state.groupmakerStatus ? `<p class="gm-status">${escapeHtml(state.groupmakerStatus)}</p>` : '';
   const sessions = groupmakerSessions().filter((row) => !String(row.closed_at || '').trim()).slice().sort((a, b) => String(b.touched_at || '').localeCompare(String(a.touched_at || '')));
+  const scenarios = groupmakerScenarios().filter((row) => !String(row.ended_at || '').trim()).slice().sort((a, b) => String(b.touched_at || b.created_at || '').localeCompare(String(a.touched_at || a.created_at || '')));
+  const activeScenario = activeGroupmakerScenario();
+  if (state.groupmakerSyncScenarioKey && !scenarios.some((row) => row.scenario_key === state.groupmakerSyncScenarioKey)) state.groupmakerSyncScenarioKey = '';
+  const scenarioChooser = scenarios.length ? `<label class="gm-sync-source"><span>Update group from</span><select id="gm-sync-source"><option value="" ${state.groupmakerSyncScenarioKey ? '' : 'selected'}>Current GROUPMAKER content</option>${scenarios.map((row) => `<option value="${escapeHtml(row.scenario_key)}" ${row.scenario_key === state.groupmakerSyncScenarioKey ? 'selected' : ''}>Saved: ${escapeHtml(row.name || 'Unnamed scenario')}</option>`).join('')}</select><small>Choosing a saved scenario restores it before Create / Update.</small></label>` : '';
+  const scenarioMarkup = `<section class="gm-scenario-panel"><div class="gm-scenario-head"><div><b>Scenarios</b><small>${activeScenario ? `Active: ${escapeHtml(activeScenario.name || 'Unnamed')}` : 'Save the form without changing Kindroid.'}</small></div><button id="gm-save-scenario" class="ghost" type="button">Save scenario</button></div>${scenarios.length ? `<div class="gm-scenario-list">${scenarios.map((row) => `<article class="gm-scenario ${row.scenario_key === activeScenario?.scenario_key ? 'selected' : ''}"><button class="gm-scenario-restore ghost" data-scenario="${escapeHtml(row.scenario_key)}" type="button"><b>${escapeHtml(row.name || 'Unnamed scenario')}</b><small>${escapeHtml(row.location || 'No location')} · ${escapeHtml(row.activity || 'No activity')}</small></button><button class="gm-scenario-end danger" data-scenario="${escapeHtml(row.scenario_key)}" type="button" title="End scenario">End</button></article>`).join('')}</div>` : ''}</section>`;
   const namesField = state.groupmakerUseNames ? `<label><span>Names to detect</span><textarea id="gm-names" placeholder="Type names from the bridge directory…">${escapeHtml(state.groupmakerNames)}</textarea></label>` : '';
   const activityField = state.groupmakerUseActivity ? `<label><span>Activity</span><input id="gm-activity" value="${escapeHtml(state.groupmakerActivity)}" placeholder="Talking together at a patio table" /></label>` : '';
-  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label class="gm-field-option"><span><input id="gm-use-names" type="checkbox" ${state.groupmakerUseNames ? 'checked' : ''}/> Use names field</span><small>${state.groupmakerUseNames ? 'Detect participants from this field.' : 'Participants are detected from group context.'}</small></label>${namesField}<div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label class="gm-field-option"><span><input id="gm-use-activity" type="checkbox" ${state.groupmakerUseActivity ? 'checked' : ''}/> Use activity field</span><small>${state.groupmakerUseActivity ? 'Use the activity below as the current scene.' : 'Location is used as the activity.'}</small></label>${activityField}<label><span>Group context</span><textarea id="gm-context" placeholder="Persistent shared context for this group">${escapeHtml(state.groupmakerContext)}</textarea></label><label class="gm-field-option gm-auto-option"><span><input id="gm-auto-mode" type="checkbox" ${state.groupmakerAutoMode ? 'checked' : ''}/> Auto mode</span><small>Create or update once, 5 seconds after you stop editing.</small></label><div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? `Update ${localCalendarDate()}` : `Create ${localCalendarDate()}`}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div>${groupmakerStatus}${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml(row.group_name || (row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
+  return `<aside class="groupmaker-float ${state.groupmakerMinimized ? 'mini' : ''}"><div class="gm-head"><div><p class="eyebrow">GROUPMAKER</p><h3>Kindroid bridge</h3></div><div><button id="gm-min" class="ghost">${state.groupmakerMinimized ? 'Open' : 'Min'}</button><button id="gm-close" class="ghost">×</button></div></div>${state.groupmakerMinimized ? '' : `<label><span>Kindroid API key</span><input id="gm-api-key" type="password" value="${escapeHtml(state.kindroidApiKey)}" placeholder="kn_…" /></label><div class="gm-row"><button id="gm-connect">${state.kindroidConnected ? 'Reconnect' : 'Connect Kindroid'}</button><button id="gm-forget" class="ghost">Forget key</button></div><label class="gm-field-option"><span><input id="gm-use-names" type="checkbox" ${state.groupmakerUseNames ? 'checked' : ''}/> Use names field</span><small>${state.groupmakerUseNames ? 'Detect participants from this field.' : 'Participants are detected from group context.'}</small></label>${namesField}<div id="gm-detected" class="gm-detected">${groupmakerDetectedMarkup(people)}</div><label><span>Location</span><input id="gm-location" value="${escapeHtml(state.groupmakerLocation)}" placeholder="Coffee Shop" /></label><label class="gm-field-option"><span><input id="gm-use-activity" type="checkbox" ${state.groupmakerUseActivity ? 'checked' : ''}/> Use activity field</span><small>${state.groupmakerUseActivity ? 'Use the activity below as the current scene.' : 'Location is used as the activity.'}</small></label>${activityField}<label><span>Group context</span><textarea id="gm-context" placeholder="Persistent shared context for this group">${escapeHtml(state.groupmakerContext)}</textarea></label><label class="gm-field-option gm-auto-option"><span><input id="gm-auto-mode" type="checkbox" ${state.groupmakerAutoMode ? 'checked' : ''}/> Auto mode</span><small>Create or update once, 5 seconds after you stop editing.</small></label>${scenarioMarkup}${scenarioChooser}<div class="gm-row"><button id="gm-sync" ${state.groupmakerBusy ? 'disabled' : ''}>${active ? `Update ${localCalendarDate()}` : `Create ${localCalendarDate()}`}</button><button id="gm-close-session" class="danger" ${active ? '' : 'disabled'}>Close active</button></div>${groupmakerStatus}${transcriptStatus}<div class="gm-sessions"><b>Open sessions</b>${sessions.length ? sessions.map((row) => `<button class="gm-session ${String(row.session_key) === String(state.config.groupmaker_active_session_key) ? 'selected' : ''}" data-session="${escapeHtml(row.session_key)}"><span>${escapeHtml(row.group_name || (row.names || []).join(', ') || 'Unnamed')}</span><small>${escapeHtml(row.group_id || '')}</small></button>`).join('') : '<small>No sessions yet.</small>'}</div>`}</aside>`;
 }
 
 
@@ -2055,6 +2129,15 @@ async function runGroupmakerPresenceAutomations({ people = [], groupId = '', act
 async function syncGroupmaker({ automatic = false, openCall = true } = {}) {
   const keyInput = document.querySelector('#gm-api-key');
   if (keyInput) state.kindroidApiKey = keyInput.value.trim();
+  const selectedScenarioKey = document.querySelector('#gm-sync-source')?.value || state.groupmakerSyncScenarioKey;
+  if (selectedScenarioKey) {
+    const selectedScenario = groupmakerScenarios().find((row) => row.scenario_key === selectedScenarioKey && !String(row.ended_at || '').trim());
+    if (selectedScenario) {
+      applyGroupmakerScenario(selectedScenario);
+      state.config.groupmaker_active_scenario_key = selectedScenario.scenario_key;
+      state.groupmakerSyncScenarioKey = selectedScenario.scenario_key;
+    }
+  }
   const active = activeGroupmakerSession();
   if (active && (!state.groupmakerNames.trim() || !state.groupmakerContext.trim())) {
     state.groupmakerNames = Array.isArray(active.names) ? active.names.join(', ') : state.groupmakerNames;
@@ -2293,10 +2376,14 @@ function bindDirectoryEvents() {
   document.querySelector('#gm-connect')?.addEventListener('click', () => { state.kindroidApiKey = document.querySelector('#gm-api-key').value.trim(); if (rememberKindroidApiKey()) { state.groupmakerStatus = 'Kindroid API key connected and remembered locally. Ready to create or update groups.'; } else { state.groupmakerStatus = 'Kindroid API keys should start with kn_.'; } render(); });
   document.querySelector('#gm-forget')?.addEventListener('click', () => { state.kindroidApiKey = ''; state.kindroidConnected = false; localStorage.removeItem(KINDROID_API_KEY_STORAGE_KEY); state.groupmakerStatus = 'Kindroid API key forgotten.'; render(); });
   document.querySelector('#gm-sync')?.addEventListener('click', () => syncGroupmaker());
+  document.querySelector('#gm-save-scenario')?.addEventListener('click', saveCurrentGroupmakerScenario);
+  document.querySelector('#gm-sync-source')?.addEventListener('change', (event) => { state.groupmakerSyncScenarioKey = event.target.value; });
+  document.querySelectorAll('.gm-scenario-restore').forEach((button) => button.addEventListener('click', () => restoreGroupmakerScenario(button.dataset.scenario)));
+  document.querySelectorAll('.gm-scenario-end').forEach((button) => button.addEventListener('click', () => endGroupmakerScenario(button.dataset.scenario)));
   document.querySelector('#gm-close-session')?.addEventListener('click', () => { const active = activeGroupmakerSession(); if (active) { active.closed_at = new Date().toISOString(); state.config.groupmaker_active_session_key = ''; saveBridge('GROUPMAKER close session'); } });
   document.querySelectorAll('.gm-session').forEach((button) => button.addEventListener('click', () => { state.config.groupmaker_active_session_key = button.dataset.session; saveBridge('GROUPMAKER activate session'); }));
-  ['names', 'location', 'activity', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; if (key === 'names' || (key === 'context' && !state.groupmakerUseNames)) refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); scheduleGroupmakerAutoSync(); }); });
-  [['use-names', 'groupmakerUseNames'], ['use-activity', 'groupmakerUseActivity'], ['auto-mode', 'groupmakerAutoMode']].forEach(([id, stateKey]) => { document.querySelector(`#gm-${id}`)?.addEventListener('change', (event) => { state[stateKey] = event.target.checked; scheduleGroupmakerDraftSave(); render(); scheduleGroupmakerAutoSync(); }); });
+  ['names', 'location', 'activity', 'context'].forEach((key) => { document.querySelector(`#gm-${key}`)?.addEventListener('input', (e) => { state[`groupmaker${key[0].toUpperCase()}${key.slice(1)}`] = e.target.value; state.groupmakerSyncScenarioKey = ''; if (key === 'names' || (key === 'context' && !state.groupmakerUseNames)) refreshGroupmakerDetectedList(); scheduleGroupmakerDraftSave(); scheduleGroupmakerAutoSync(); }); });
+  [['use-names', 'groupmakerUseNames'], ['use-activity', 'groupmakerUseActivity'], ['auto-mode', 'groupmakerAutoMode']].forEach(([id, stateKey]) => { document.querySelector(`#gm-${id}`)?.addEventListener('change', (event) => { state[stateKey] = event.target.checked; if (id !== 'auto-mode') state.groupmakerSyncScenarioKey = ''; scheduleGroupmakerDraftSave(); render(); scheduleGroupmakerAutoSync(); }); });
   const current = selectedEntry();
   if (!current) return;
   const updateKeyphraseCount = () => { const count = normalizeJournalKeyphrases(document.querySelector('#journal-keyphrases')?.value || '').length; const output = document.querySelector('#journal-keyphrase-count'); if (output) output.textContent = String(count); };

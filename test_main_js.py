@@ -17,6 +17,18 @@ def test_groupmaker_sync_button_uses_existing_sync_function():
     assert "document.querySelector('#gm-sync')?.addEventListener('click', () => syncGroupmaker());" in MAIN_JS
 
 
+def test_groupmaker_scenarios_can_be_saved_restored_ended_and_selected_for_sync():
+    assert "function groupmakerScenarios()" in MAIN_JS
+    assert "async function saveCurrentGroupmakerScenario()" in MAIN_JS
+    assert "without updating the Kindroid group" in MAIN_JS
+    assert "async function restoreGroupmakerScenario(scenarioKey)" in MAIN_JS
+    assert "async function endGroupmakerScenario(scenarioKey)" in MAIN_JS
+    assert 'id="gm-sync-source"' in MAIN_JS
+    assert "applyGroupmakerScenario(selectedScenario);" in MAIN_JS
+    assert "groupmaker_active_scenario_key" in MAIN_JS
+    assert ".gm-scenario-panel" in STYLES_CSS
+
+
 def test_directory_kindroid_uses_legacy_compatibility_routes():
     assert "directory_create_kin','Directory Create Kin'" in MAIN_JS
     assert "'POST','/create-new-ai'" in MAIN_JS
