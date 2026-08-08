@@ -49,6 +49,8 @@ GROUPMAKER initializes `transcripts/<group-id>/transcript.json` with its partici
 
 The frontend does not navigate the prepared browser/Electron tab to Kindroid until both `config.json` and the transcript participant metadata have been written successfully. This prevents automatic userscript capture from winning a race and creating an empty participant list first.
 
+When `config.json` grows beyond the GitHub Contents API's inline-content limit, the transcript userscript follows the response's Git blob URL and decodes that payload instead. This keeps participant recovery working for large bridge configurations rather than attempting to parse the Contents API's empty `content` field.
+
 ## Install
 
 1. Install Tampermonkey in the browser.

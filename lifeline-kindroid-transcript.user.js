@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LIFELINE Kindroid Transcript Bridge
 // @namespace    https://github.com/unclesam45/LIFELINE
-// @version      1.2.8
+// @version      1.2.9
 // @description  Captures Kindroid group-call transcripts and merges them into LIFELINE_BRIDGE.
 // @match        https://kindroid.ai/v2/call/*
 // @match        https://www.kindroid.ai/v2/call/*
@@ -94,6 +94,18 @@
     return btoa(binary);
   }
 
+  async function readGithubFileUtf8(token, file, action) {
+    // GitHub's Contents API deliberately returns an empty `content` field once
+    // a file is larger than 1 MB. Fetch the linked Git blob in that case rather
+    // than trying to parse an empty string as JSON.
+    if (file?.encoding === 'base64' && normalizeText(file.content)) return decodeBase64Utf8(file.content);
+    if (!file?.git_url) throw new Error(`${action} returned no file content.`);
+    const response = await request({ method: 'GET', url: file.git_url, headers: githubHeaders(token) });
+    const blob = parseGithubResponse(response, action);
+    if (blob?.encoding !== 'base64' || !normalizeText(blob.content)) throw new Error(`${action} returned no Git blob content.`);
+    return decodeBase64Utf8(blob.content);
+  }
+
   async function readTranscript(token, repoPath, attempt = 0) {
     const cacheBuster = `${Date.now()}-${attempt}-${Math.random().toString(36).slice(2)}`;
     const response = await request({
@@ -103,7 +115,7 @@
     });
     if (response.status === 404) return { sha: '', doc: null };
     const file = parseGithubResponse(response, 'Reading the bridge transcript');
-    try { return { sha: file.sha || '', doc: JSON.parse(decodeBase64Utf8(file.content)) }; }
+    try { return { sha: file.sha || '', doc: JSON.parse(await readGithubFileUtf8(token, file, 'Reading the bridge transcript')) }; }
     catch (error) { throw new Error(`Could not parse the existing transcript JSON: ${error.message}`); }
   }
 
@@ -112,7 +124,7 @@
     if (response.status === 404) return [];
     const file = parseGithubResponse(response, 'Reading GROUPMAKER participant metadata');
     let config;
-    try { config = JSON.parse(decodeBase64Utf8(file.content)); }
+    try { config = JSON.parse(await readGithubFileUtf8(token, file, 'Reading GROUPMAKER participant metadata')); }
     catch (error) { throw new Error(`Could not parse bridge config participant metadata: ${error.message}`); }
     const sessions = Array.isArray(config?.groupmaker_sessions) ? config.groupmaker_sessions : [];
     const session = sessions.filter((row) => normalizeText(row?.group_id) === id)
