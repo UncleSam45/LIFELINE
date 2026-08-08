@@ -1540,16 +1540,17 @@ function renderLogin() {
   document.querySelector('#crowdnet-login-form').addEventListener('submit', connect);
   window.crowdnetLogger = Object.freeze({
     element: document.querySelector('#crowdnet-connection-logger'),
-    update: ({ server, accessKey } = {}) => {
+    update: ({ server, accessKey, storage } = {}) => {
       if (server !== undefined) document.querySelector('#logger-server').value = String(server ?? '');
       if (accessKey !== undefined) document.querySelector('#logger-access-key').value = String(accessKey ?? '');
+      if (storage !== undefined) document.querySelector('#logger-storage').value = String(storage ?? '');
     },
-    clear: () => { document.querySelector('#logger-server').value = ''; document.querySelector('#logger-access-key').value = ''; },
+    clear: () => { document.querySelector('#logger-server').value = ''; document.querySelector('#logger-access-key').value = ''; document.querySelector('#logger-storage').value = ''; },
   });
 }
 
 function connectionLoggerMarkup() {
-  return `<aside id="crowdnet-connection-logger" aria-label="Connection logger"><div class="logger-shell"><div class="logger-scan"></div><header><div class="logger-title"><i class="logger-pulse"></i><h2>CONNECTION LOGGER</h2></div><span>LIVE FEED · 02</span></header><form id="crowdnet-login-form" class="logger-fields"><label>SERVER<div class="logger-value"><input id="logger-server" name="server" type="text" value="${escapeHtml(state.server)}" placeholder="AWAITING SERVER" autocomplete="off" spellcheck="false" required></div></label><label>ACCESS KEY<div class="logger-value"><input id="logger-access-key" name="accessKey" type="password" value="${escapeHtml(state.accessKey)}" placeholder="AWAITING KEY" autocomplete="off" spellcheck="false" required></div></label><button class="logger-submit" type="submit">CONNECT</button></form></div></aside>`;
+  return `<aside id="crowdnet-connection-logger" aria-label="Connection logger"><div class="logger-shell"><div class="logger-scan"></div><header><div class="logger-title"><i class="logger-pulse"></i><h2>CONNECTION LOGGER</h2></div><span>LIVE FEED · 02</span></header><form id="crowdnet-login-form" class="logger-form"><div class="logger-fields"><label>SERVER<div class="logger-value"><input id="logger-server" name="server" type="text" value="${escapeHtml(state.server)}" placeholder="AWAITING SERVER" autocomplete="off" spellcheck="false" required></div></label><label>ACCESS KEY<div class="logger-value"><input id="logger-access-key" name="accessKey" type="password" value="${escapeHtml(state.accessKey)}" placeholder="AWAITING KEY" autocomplete="off" spellcheck="false" required></div></label><label class="logger-storage">STORAGE<div class="logger-value"><input id="logger-storage" name="storage" type="text" placeholder="AWAITING STORAGE" autocomplete="off" spellcheck="false"></div></label></div><div class="logger-actions"><span class="logger-security"><i></i> END-TO-END ENCRYPTED</span><button type="submit">CONFIRM <span aria-hidden="true">→</span></button></div></form></div></aside>`;
 }
 
 function entryInitials(entry) {

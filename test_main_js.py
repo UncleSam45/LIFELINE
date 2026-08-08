@@ -365,6 +365,13 @@ def test_connection_logger_supports_server_and_access_key_login():
     assert 'id="crowdnet-login-form"' in MAIN_JS
     assert 'name="server"' in MAIN_JS
     assert 'name="accessKey"' in MAIN_JS
+    assert 'id="logger-storage" name="storage"' in MAIN_JS
+    assert 'placeholder="AWAITING STORAGE"' in MAIN_JS
+    assert 'logger-storage" name="storage" type="text" placeholder="AWAITING STORAGE" autocomplete="off" spellcheck="false"' in MAIN_JS
+    assert 'COMING SOON' not in MAIN_JS
+    assert 'logger-storage-note' not in MAIN_JS
+    assert 'class="logger-actions"' in MAIN_JS
+    assert 'CONFIRM <span aria-hidden="true">→</span>' in MAIN_JS
     assert "source.querySelector('[name=\"server\"]')" in MAIN_JS
     assert "source.querySelector('[name=\"accessKey\"]')" in MAIN_JS
     assert "logger.classList.add('logger-connected')" in MAIN_JS
