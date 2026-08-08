@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from lifeline_memory_manager import (
     MEMORY_HELPER_ACTIVITY_WINDOW_SECONDS,
+    DependencyInstaller,
     GitHubBridge,
     MainWindow,
     MemoryDB,
@@ -16,6 +17,22 @@ from lifeline_memory_manager import (
     _decode_bridge_config,
     open_minimized_to_tray,
 )
+
+
+class DependencyInstallerTests(unittest.TestCase):
+    @patch("lifeline_memory_manager.subprocess.check_call")
+    @patch("lifeline_memory_manager.importlib.import_module", side_effect=ImportError)
+    def test_missing_optional_dependency_does_not_trigger_runtime_install(
+        self, _import_module, check_call
+    ) -> None:
+        with (
+            patch.object(DependencyInstaller, "REQUIRED", {}),
+            patch.object(DependencyInstaller, "OPTIONAL", {"optional_module": "optional-package"}),
+            patch("sys.stderr"),
+        ):
+            DependencyInstaller.ensure()
+
+        check_call.assert_not_called()
 
 
 class BridgeBackupTests(unittest.TestCase):

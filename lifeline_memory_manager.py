@@ -31,12 +31,22 @@ class DependencyInstaller:
 
     @classmethod
     def ensure(cls) -> None:
-        for module, package in {**cls.REQUIRED, **cls.OPTIONAL}.items():
+        for module, package in cls.REQUIRED.items():
             try:
                 importlib.import_module(module)
             except ImportError:
                 print(f"Installing missing dependency: {package}")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+        for module, package in cls.OPTIONAL.items():
+            try:
+                importlib.import_module(module)
+            except ImportError:
+                print(
+                    f"Optional dependency unavailable: {package}; "
+                    "continuing without it.",
+                    file=sys.stderr,
+                )
 
 
 DependencyInstaller.ensure()
