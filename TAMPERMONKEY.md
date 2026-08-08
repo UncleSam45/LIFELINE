@@ -18,9 +18,7 @@ replace its template with the complete contents of `KINDROIDXL.js`, and save it.
 
 ## Call message toolkit
 
-`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
-
-The green **SPEAKER MONITOR** control at the bottom left is enabled by default and immediately watches Kindroid's active-speaker tile. If the same detected speaker remains active for two minutes, the toolkit sends `*CONTINUES CONVERSATION*` and immediately starts a fresh two-minute interval even when the active speaker does not change. Click the control to stop monitoring; click it again to resume.
+`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts exactly one inline-reply button at the middle-left of the screen: `*CONTINUES CONVERSATION*`. Clicking it sends that exact message. There are no editable presets, additional reply buttons, free-form reply field, or automatic speaker monitor.
 
 For Tampermonkey, create a new script and paste the complete contents of `lifeline-kindroid-call-toolkit.user.js`, or install that raw file directly. It has no external `@require`; the metadata and complete implementation live in the same valid userscript file.
 
