@@ -18,9 +18,7 @@ replace its template with the complete contents of `KINDROIDXL.js`, and save it.
 
 ## Call message toolkit
 
-`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts a large, collapsible quick-reply panel at the middle-left of the screen. Its starter replies can be sent with one click. The large text field sends on Enter (use Shift+Enter for a new line) and automatically encloses every on-the-fly message in asterisks. Open the gear menu to add, edit, or delete presets; changes are saved in browser storage and remain available after reloads. Preset messages continue to be sent exactly as saved.
-
-The green **SPEAKER MONITOR** control at the bottom left is enabled by default and immediately watches Kindroid's active-speaker tile. If the same detected speaker remains active for two minutes, the toolkit sends `*CONTINUES CONVERSATION*` and immediately starts a fresh two-minute interval even when the active speaker does not change. Click the control to stop monitoring; click it again to resume.
+`lifeline-kindroid-call-toolkit.user.js` is the single, standalone call-page toolkit used by both Electron and Tampermonkey. On Kindroid call pages it mounts exactly one inline-reply button at the middle-left of the screen: `*CONTINUES CONVERSATION*`. Clicking it sends that exact message. There are no editable presets, additional reply buttons, free-form reply field, or automatic speaker monitor.
 
 For Tampermonkey, create a new script and paste the complete contents of `lifeline-kindroid-call-toolkit.user.js`, or install that raw file directly. It has no external `@require`; the metadata and complete implementation live in the same valid userscript file.
 
@@ -48,6 +46,8 @@ Tampermonkey cannot bypass browser media-permission prompts.
 GROUPMAKER initializes `transcripts/<group-id>/transcript.json` with its participant names when a group is created or updated. If a transcript already has an empty participant list, the userscript recovers the matching names from `config.json` before saving. It only detects speaker names from the Kindroid DOM when neither source contains GROUPMAKER metadata. Captures append transcript text without replacing authoritative participants.
 
 The frontend does not navigate the prepared browser/Electron tab to Kindroid until both `config.json` and the transcript participant metadata have been written successfully. This prevents automatic userscript capture from winning a race and creating an empty participant list first.
+
+When `config.json` grows beyond the GitHub Contents API's inline-content limit, the transcript userscript follows the response's Git blob URL and decodes that payload instead. This keeps participant recovery working for large bridge configurations rather than attempting to parse the Contents API's empty `content` field.
 
 ## Install
 
